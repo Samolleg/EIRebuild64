@@ -123,9 +123,12 @@ void PipelineCache::build(Entry& entry) {
         std::lock_guard<std::mutex> lock(library_mutex_);
         hr = entry.compute ? library_->LoadComputePipeline(entry.name.c_str(), &entry.compute_desc, IID_PPV_ARGS(&pipeline))
                            : library_->LoadGraphicsPipeline(entry.name.c_str(), &entry.graphics, IID_PPV_ARGS(&pipeline));
+        if (SUCCEEDED(hr)) {
+            entry.pipeline = pipeline;
+            entry.stored = true;  // save() lists it from here on
+        }
     }
     if (SUCCEEDED(hr)) {
-        entry.pipeline = pipeline;
         ++loaded_;
         elapsed();
         return;
@@ -148,6 +151,7 @@ void PipelineCache::build(Entry& entry) {
     // when the driver refuses a pipeline for the new library.
     std::lock_guard<std::mutex> lock(library_mutex_);
     (void)library_->StorePipeline(entry.name.c_str(), pipeline.Get());
+    entry.stored = true;
     dirty_ = true;
 }
 
@@ -226,38 +230,56 @@ bool PipelineCache::idle() const {
 
 bool PipelineCache::save(std::string& reason, bool* written) {
     if (written) *written = false;
+    std::lock_guard<std::mutex> saving(save_mutex_);
+    // The pipelines to write and the cleared dirty flag in one step, under
+    // both locks (#325): a worker sets its entry's pipeline and stored before
+    // it releases library_mutex_, so every pipeline in library_ by now is in
+    // this list, and one stored after it sets dirty_ again for the next save.
     std::vector<std::pair<const wchar_t*, ID3D12PipelineState*>> ready;  // entries_ never shrink: the pointers stay valid
     {
+        std::lock_guard<std::mutex> library(library_mutex_);
+        if (!dirty_ || !device1_ || !library_) return true;  // unchanged: the file already holds them
         std::lock_guard<std::mutex> lock(mutex_);
         for (const auto& entry : entries_)
-            if (entry->done && entry->pipeline) ready.emplace_back(entry->name.c_str(), entry->pipeline.Get());
+            if ((entry->done || entry->stored) && entry->pipeline) ready.emplace_back(entry->name.c_str(), entry->pipeline.Get());
+        dirty_ = false;
     }
-    std::lock_guard<std::mutex> lock(library_mutex_);
-    if (!dirty_ || !device1_ || !library_) return true;  // unchanged: the file already holds them
+    // The new library, its serialisation and the file without the locks:
+    // workers keep loading and storing, and a draw's synchronous build never
+    // waits for this write (0.4-0.7 s on a GTX 1070 Ti).
+    const auto fail = [&](std::string why) {
+        reason = std::move(why);
+        std::lock_guard<std::mutex> library(library_mutex_);
+        dirty_ = true;  // the next save tries again
+        return false;
+    };
     ComPtr<ID3D12PipelineLibrary> fresh;
     HRESULT hr = device1_->CreatePipelineLibrary(nullptr, 0, IID_PPV_ARGS(&fresh));
-    if (FAILED(hr)) { reason = hresult_text("CreatePipelineLibrary (to save)", hr); return false; }
+    if (FAILED(hr)) return fail(hresult_text("CreatePipelineLibrary (to save)", hr));
     std::uint32_t refused = 0;
     for (const auto& pipeline : ready)
         if (FAILED(fresh->StorePipeline(pipeline.first, pipeline.second))) ++refused;
     // A refused pipeline would be missing from the new library: write the
     // loaded library instead (the file's pipelines plus this session's new
     // ones), so the file never loses a pipeline in use.
-    ID3D12PipelineLibrary* const written_library = refused ? library_.Get() : fresh.Get();
-    std::vector<char> bytes(written_library->GetSerializedSize());
-    hr = written_library->Serialize(bytes.data(), bytes.size());
-    if (FAILED(hr)) { reason = hresult_text("ID3D12PipelineLibrary::Serialize", hr); return false; }
+    std::vector<char> bytes;
+    if (refused) {
+        std::lock_guard<std::mutex> library(library_mutex_);
+        bytes.resize(library_->GetSerializedSize());
+        hr = library_->Serialize(bytes.data(), bytes.size());
+    } else {
+        bytes.resize(fresh->GetSerializedSize());
+        hr = fresh->Serialize(bytes.data(), bytes.size());
+    }
+    if (FAILED(hr)) return fail(hresult_text("ID3D12PipelineLibrary::Serialize", hr));
     const std::wstring temporary = path_ + L".tmp";
     {
         std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
         out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
-        if (!out) { reason = "cannot write the pipeline library file"; return false; }
+        if (!out) return fail("cannot write the pipeline library file");
     }
-    if (!MoveFileExW(temporary.c_str(), path_.c_str(), MOVEFILE_REPLACE_EXISTING)) {
-        reason = hresult_text("MoveFileEx (pipeline library)", HRESULT_FROM_WIN32(GetLastError()));
-        return false;
-    }
-    dirty_ = false;
+    if (!MoveFileExW(temporary.c_str(), path_.c_str(), MOVEFILE_REPLACE_EXISTING))
+        return fail(hresult_text("MoveFileEx (pipeline library)", HRESULT_FROM_WIN32(GetLastError())));
     if (written) *written = true;
     saved_count_ = static_cast<std::uint32_t>(ready.size());  // in either library
     save_refused_ = refused;

@@ -1,5 +1,4 @@
 #pragma once
-#include <d3d11.h>
 #include <d3d12.h>
 #include <dxgi1_5.h>
 
@@ -11,14 +10,6 @@
 
 // Owned COM references are returned through output parameters. Callbacks are
 // synchronous and borrowed only for the duration of their enclosing call.
-using EiRenderStage = void (*)(void* context, const char* stage) noexcept;
-extern "C" EI_RENDER_PUBLIC HRESULT EiCreateDevice11V1(
-    D3D_DRIVER_TYPE driver, ID3D11Device** device, D3D_FEATURE_LEVEL* level,
-    ID3D11DeviceContext** immediate) noexcept;
-extern "C" EI_RENDER_PUBLIC HRESULT EiCreateSwapChain11V1(
-    ID3D11Device* device, HWND window, UINT width, UINT height, EiRenderStage stage,
-    void* context, IDXGISwapChain** swapChain, UINT* flags, BOOL* tearing) noexcept;
-
 extern "C" EI_RENDER_PUBLIC HRESULT EiCreateDevice12V1(
     BOOL debugLayer, BOOL gpuValidation, IDXGIFactory4** factory, IDXGIAdapter1** adapter,
     ID3D12Device** device, char* error, SIZE_T errorSize) noexcept;

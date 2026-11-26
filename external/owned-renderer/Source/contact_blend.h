@@ -3,7 +3,9 @@
 #include <cstdint>
 #include <array>
 #include <algorithm>
+#include <cctype>
 #include <cmath>
+#include <string>
 
 namespace owned {
 
@@ -11,6 +13,26 @@ namespace owned {
 // crate). Its pixels just above the drawn terrain take the terrain material.
 // Units, terrain, liquids and UI never carry it.
 constexpr std::uint32_t native_ground_contact_flag = 0x80u;
+// Textures whose objects never take the blend (cloth tents): the game
+// texture names in eid3d_materials\scenery.json "no_ground_contact"
+// (renderer_materials.cpp). Case-insensitive; read once.
+bool ground_contact_excluded(const std::string& texture);
+// Map object type of levers (CLeverObject; every ID_LEVER record in the
+// shipped maps carries ID_OBJTYPE 60, and only they do).
+constexpr std::uint32_t lever_object_type = 60;
+// A lever with this model is Dejavu ground loot: an item figure (uh*) or a
+// loot bag (nmoloot*). Chests, gates and rocks are levers with other models,
+// and no lever data separates them (#324). Loot reads as its own object, so
+// it takes no ground contact blend.
+inline bool loot_lever_model(const std::string& mask) noexcept {
+    const auto prefix = [&](const char* text, std::size_t size) {
+        if (mask.size() < size) return false;
+        for (std::size_t i = 0; i < size; ++i)
+            if (std::tolower(static_cast<unsigned char>(mask[i])) != text[i]) return false;
+        return true;
+    };
+    return prefix("uh", 2) || prefix("nmoloot", 7);
+}
 // contactBlendTop below: above this many contact bands (and at least
 // 0.15 m) over the drawn ground the blend leaves a pixel unchanged.
 constexpr float contact_blend_top_bands = 2.5f;

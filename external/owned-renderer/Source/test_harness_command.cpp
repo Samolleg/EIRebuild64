@@ -102,6 +102,21 @@ HarnessCommand parse_harness_command(std::string_view line) {
         command.name = text;
         command.verb = HarnessVerb::console;
     } else if (verb == "camera") {
+        if (w.size() >= 2 && w[1] == "hero") {
+            if (w.size() != 2 && w.size() != 5)
+                return rejected("usage: camera hero [yaw pitch zoom]");
+            for (int i = 0; i < 5; ++i) command.number[i] = std::numeric_limits<float>::quiet_NaN();
+            if (w.size() == 5) {
+                for (int i = 2; i < 5; ++i)
+                    if (i == 2 && w[i] == "-") continue;
+                    else if (!number(w[i], command.number[i])) return rejected("camera hero: bad number");
+                if (command.number[3] < -90.0f || command.number[3] > 90.0f)
+                    return rejected("camera hero: pitch outside -90..90 degrees");
+                if (command.number[4] <= 0.0f) return rejected("camera hero: zoom must be positive");
+            }
+            command.verb = HarnessVerb::camera_hero;
+            return command;
+        }
         if (w.size() != 6) return rejected("usage: camera x y yaw pitch zoom (x y yaw may be - : keep the current one)");
         for (int i = 0; i < 5; ++i)
             if (i < 3 && w[i + 1] == "-") command.number[i] = std::numeric_limits<float>::quiet_NaN();
@@ -110,6 +125,28 @@ HarnessCommand parse_harness_command(std::string_view line) {
             return rejected("camera: pitch outside -90..90 degrees");
         if (command.number[4] <= 0.0f) return rejected("camera: zoom must be positive");
         command.verb = HarnessVerb::camera;
+    } else if (verb == "camera_unit") {
+        // The unit by id, or by place: @x,y is the unit nearest that world
+        // position (name "@", position in number[3..4]).
+        std::int32_t id = 0;
+        bool target = false;
+        if (w.size() == 5 && w[1].size() > 1 && w[1].front() == '@') {
+            const std::string_view place = w[1].substr(1);
+            const auto comma = place.find(',');
+            target = comma != std::string_view::npos && number(place.substr(0, comma), command.number[3]) &&
+                     number(place.substr(comma + 1), command.number[4]);
+            command.name = "@";
+        } else if (w.size() == 5) {
+            const auto [end, error] = std::from_chars(w[1].data(), w[1].data() + w[1].size(), id);
+            target = error == std::errc() && end == w[1].data() + w[1].size();
+        }
+        if (!target || !number(w[2], command.number[0]) || !number(w[3], command.number[1]) || !number(w[4], command.number[2]))
+            return rejected("usage: camera_unit <unit id (dump_units) | @x,y (nearest unit)> <yaw> <pitch> <distance>");
+        if (command.number[1] < -90.0f || command.number[1] > 90.0f)
+            return rejected("camera_unit: pitch outside -90..90 degrees");
+        if (command.number[2] <= 0.0f) return rejected("camera_unit: distance must be positive");
+        command.frames = static_cast<std::uint32_t>(id);
+        command.verb = HarnessVerb::camera_unit;
     } else if (verb == "camera_path") {
         // Temporary (camera-movement frame cost): frames, then the target as
         // x y yaw dist pitch, stored in the camera order (x y yaw pitch zoom).
@@ -175,11 +212,70 @@ HarnessCommand parse_harness_command(std::string_view line) {
         if (w.size() != 2 || !whole(w[1], command.frames) || command.frames == 0 ||
             command.frames > 100000) return rejected("usage: wait <presents 1..100000>");
         command.verb = HarnessVerb::wait;
+    } else if (verb == "spawn") {
+        // The prototype may hold spaces: "..." quotes it.
+        std::string_view rest = line.substr(line.find(verb) + verb.size());
+        const auto skip = [&rest] { while (!rest.empty() && (rest.front() == ' ' || rest.front() == '\t')) rest.remove_prefix(1); };
+        const auto token = [&rest, &skip]() -> std::string_view {
+            skip();
+            if (!rest.empty() && rest.front() == '"') {
+                const auto close = rest.find('"', 1);
+                if (close == std::string_view::npos) return {};
+                const auto out = rest.substr(1, close - 1);
+                rest.remove_prefix(close + 1);
+                return out;
+            }
+            std::size_t n = 0;
+            while (n < rest.size() && rest[n] != ' ' && rest[n] != '\t') ++n;
+            const auto out = rest.substr(0, n);
+            rest.remove_prefix(n);
+            return out;
+        };
+        static const char kUsage[] =
+            "usage: spawn <prototype | \"prototype\"> <x> <y> [yaw=deg] [player=0..31] [model=mask] [prim=texture] [sec=texture]";
+        const auto prototype = token();
+        if (prototype.empty() || prototype.size() > 63 || prototype.find_first_of("\r\n") != std::string_view::npos)
+            return rejected(kUsage);
+        if (!number(token(), command.number[0]) || !number(token(), command.number[1])) return rejected(kUsage);
+        command.name = std::string(prototype);
+        std::string model, prim, sec;
+        for (auto option = token(); !option.empty(); option = token()) {
+            const auto eq = option.find('=');
+            if (eq == std::string_view::npos || eq + 1 == option.size()) return rejected(kUsage);
+            const auto key = option.substr(0, eq), value = option.substr(eq + 1);
+            if (key == "yaw") { if (!number(value, command.number[2])) return rejected(kUsage); }
+            else if (key == "player") {
+                if (!whole(value, command.frames) || command.frames > 31) return rejected(kUsage);
+            } else if ((key == "model" || key == "prim" || key == "sec") && plain_name(value)) {
+                (key == "model" ? model : key == "prim" ? prim : sec) = std::string(value);
+            } else return rejected(kUsage);
+        }
+        command.value = model + "\n" + prim + "\n" + sec;
+        command.verb = HarnessVerb::spawn;
+    } else if (verb == "drawall") {
+        if (w.size() != 2 || (w[1] != "on" && w[1] != "off")) return rejected("usage: drawall on|off");
+        command.frames = w[1] == "on" ? 1u : 0u;
+        command.verb = HarnessVerb::drawall;
     } else if (verb == "pause" || verb == "godmode") {
         if (w.size() != 2 || (w[1] != "on" && w[1] != "off"))
             return rejected(verb == "pause" ? "usage: pause on|off" : "usage: godmode on|off");
         command.frames = w[1] == "on" ? 1u : 0u;
         command.verb = verb == "pause" ? HarnessVerb::pause : HarnessVerb::godmode;
+    } else if (verb == "expect") {
+        if (w.size() == 2 && (w[1] == "godmode" || w[1] == "hero_in_view")) {
+            command.verb = w[1] == "godmode" ? HarnessVerb::expect_godmode : HarnessVerb::expect_hero_in_view;
+        } else if (w.size() == 3 && (w[1] == "event_absent" || w[1] == "event_present") && plain_name(w[2])) {
+            command.name = w[2];
+            command.verb = w[1] == "event_absent" ? HarnessVerb::expect_event_absent : HarnessVerb::expect_event_present;
+        } else if (w.size() == 5 && w[1] == "value" && plain_name(w[2])) {
+            if (w[3] != "==" && w[3] != "!=" && w[3] != "<" && w[3] != "<=" && w[3] != ">" && w[3] != ">=")
+                return rejected("expect value: operator must be == != < <= > >=");
+            const auto [end, error] = std::from_chars(w[4].data(), w[4].data() + w[4].size(), command.expected);
+            if (error != std::errc{} || end != w[4].data() + w[4].size() || !std::isfinite(command.expected))
+                return rejected("expect value: number must be finite");
+            command.name = w[2]; command.value = std::string(w[3]);
+            command.verb = HarnessVerb::expect_value;
+        } else return rejected("usage: expect godmode|hero_in_view | expect event_absent|event_present <name> | expect value <name> <op> <number>");
     } else if (verb == "wait_ready") {
         std::uint32_t seconds = kHarnessReadyDefaultSeconds;
         if (w.size() > 2 || (w.size() == 2 && !whole(w[1], seconds)) ||

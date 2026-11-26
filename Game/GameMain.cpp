@@ -1488,8 +1488,7 @@ static int RunMainEntry(HINSTANCE instance, HINSTANCE previous, LPSTR command, i
     const auto report = [](const char* reason) {
         char text[2048]{};
         _snprintf_s(text, sizeof(text), _TRUNCATE,
-            "Direct3D 12 rendering stopped: %s\nSee Logs64 for details. "
-            "You can select renderer_backend=0 in Config64\\rddraw.ini and restart.",
+            "Direct3D 12 rendering stopped: %s\nSee Logs64 for details.",
             reason && *reason ? reason : "unknown rendering error");
         // RunGame has already unwound its journal guard on this boundary.
         // Keep the original failure in the native error log before CRT teardown.
@@ -1522,7 +1521,6 @@ static int RunMainEntry(HINSTANCE instance, HINSTANCE previous, LPSTR command, i
     }
 }
 
-bool InspectRendererFacadeCheckCommandLine(int& result);
 
 int APIENTRY WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command, int show)
 {
@@ -1530,7 +1528,6 @@ int APIENTRY WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command, int 
     ASanReporting64::Initialize();
 #endif
     int profileResult=0;
-    if (InspectRendererFacadeCheckCommandLine(profileResult)) return profileResult;
     if(InspectSettingsProfileCommandLine(profileResult))return profileResult;
     const int cliResult = GuardLegacyEntry(instance, previous, show);
     if (cliResult != ModCli::NotCli) return cliResult;

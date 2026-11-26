@@ -460,6 +460,12 @@ enum Fish : std::uint8_t {
     fish_burbot, fish_tilapia, fish_killifish, fish_catfish, fish_barbel, fish_mullet, fish_wels, fish_jewel, fish_rosybarb, fish_panchax, fish_count,
 };
 enum FishWater : std::uint8_t { water_none = 0, water_fresh = 1, water_swamp = 2, water_sea = 4 };
+// The drawn and simulated fish size against the hero (user, 2026-11-21: at the
+// real lengths below, 0.13-0.55 m, fish were invisible at the normal camera
+// zoom): every species x kFishShow, so a typical fish is 0.4-0.75 m and pike
+// and wels 1.5-1.65 m, the species keeping their real proportions to each
+// other (the other critters are likewise drawn above life size: species_size).
+constexpr float kFishShow = 3.f;
 struct FishRule {
     const char* name;
     float length;
@@ -479,30 +485,30 @@ inline const FishRule& fish_rule(Fish f) noexcept {
     using namespace ambient;
     constexpr std::uint32_t gipat = zbit(zone_outdoor), ingos = zbit(zone_snow), suslanger = zbit(zone_desert);
     static const FishRule rules[fish_count] = {
-        {"roach", .17f, gipat, water_fresh, 6, 12, .25f, .7f, false, 4.f, 1.f, 1.2f, .75f},
-        {"perch", .21f, gipat, water_fresh, 1, 4, .3f, .8f, false, 4.f, 1.f, 1.f, .35f},
-        {"bream", .24f, gipat, water_fresh, 4, 8, .3f, .8f, false, 4.f, 1.f, .8f, .50f},
-        {"rudd", .18f, gipat, water_fresh, 5, 10, .25f, .7f, false, 4.f, 1.f, 1.f, .60f},
-        {"tench", .24f, gipat, water_swamp, 1, 2, .3f, .9f, false, 4.f, 1.f, 1.f, .25f},
-        {"pike", .55f, gipat, water_fresh, 1, 1, .35f, 1.f, false, 5.f, 1.f, .25f, .25f},
-        {"char", .24f, ingos, water_fresh, 2, 5, .3f, .9f, false, 4.f, 1.f, 1.f, .35f},
-        {"grayling", .25f, ingos, water_fresh, 2, 4, .3f, .8f, false, 4.f, 1.f, 1.f, .50f},
-        {"whitefish", .22f, ingos, water_fresh, 6, 12, .3f, .8f, false, 4.f, 1.f, 1.2f, .80f},
-        {"burbot", .25f, ingos, water_fresh, 1, 1, .4f, 1.2f, true, 3.f, 1.f, .4f, .15f},
-        {"tilapia", .20f, suslanger, water_fresh, 3, 6, .25f, .7f, false, 4.f, 1.f, 1.f, .35f},
-        {"killifish", .13f, suslanger, water_fresh, 8, 16, .12f, .4f, false, 4.f, 1.6f, 1.2f, .90f},
-        {"catfish", .25f, suslanger, water_fresh, 1, 1, .4f, 1.2f, true, 3.f, 1.f, .4f, .20f},
-        {"barbel", .25f, suslanger, water_fresh, 2, 5, .3f, 1.f, true, 4.f, 1.f, .8f, .40f},
+        {"roach", kFishShow * .17f, gipat, water_fresh, 6, 12, .25f, .7f, false, 4.f, 1.f, 1.2f, .75f},
+        {"perch", kFishShow * .21f, gipat, water_fresh, 1, 4, .3f, .8f, false, 4.f, 1.f, 1.f, .35f},
+        {"bream", kFishShow * .24f, gipat, water_fresh, 4, 8, .3f, .8f, false, 4.f, 1.f, .8f, .50f},
+        {"rudd", kFishShow * .18f, gipat, water_fresh, 5, 10, .25f, .7f, false, 4.f, 1.f, 1.f, .60f},
+        {"tench", kFishShow * .24f, gipat, water_swamp, 1, 2, .3f, .9f, false, 4.f, 1.f, 1.f, .25f},
+        {"pike", kFishShow * .55f, gipat, water_fresh, 1, 1, .35f, 1.f, false, 5.f, 1.f, .25f, .25f},
+        {"char", kFishShow * .24f, ingos, water_fresh, 2, 5, .3f, .9f, false, 4.f, 1.f, 1.f, .35f},
+        {"grayling", kFishShow * .25f, ingos, water_fresh, 2, 4, .3f, .8f, false, 4.f, 1.f, 1.f, .50f},
+        {"whitefish", kFishShow * .22f, ingos, water_fresh, 6, 12, .3f, .8f, false, 4.f, 1.f, 1.2f, .80f},
+        {"burbot", kFishShow * .25f, ingos, water_fresh, 1, 1, .4f, 1.2f, true, 3.f, 1.f, .4f, .15f},
+        {"tilapia", kFishShow * .20f, suslanger, water_fresh, 3, 6, .25f, .7f, false, 4.f, 1.f, 1.f, .35f},
+        {"killifish", kFishShow * .13f, suslanger, water_fresh, 8, 16, .12f, .4f, false, 4.f, 1.6f, 1.2f, .90f},
+        {"catfish", kFishShow * .25f, suslanger, water_fresh, 1, 1, .4f, 1.2f, true, 3.f, 1.f, .4f, .20f},
+        {"barbel", kFishShow * .25f, suslanger, water_fresh, 2, 5, .3f, 1.f, true, 4.f, 1.f, .8f, .40f},
         // brackish and coastal water only: the sea of an open-air zone other than Ingos
-        {"mullet", .23f, gipat | suslanger, water_sea, 5, 10, .25f, .7f, false, 4.f, 1.f, 1.f, .80f},
+        {"mullet", kFishShow * .23f, gipat | suslanger, water_sea, 5, 10, .25f, .7f, false, 4.f, 1.f, 1.f, .80f},
         // Gipat's catfish (user, 2026-11-14): the Suslanger catfish's shape at wels size, the second
         // large fish; single, on the bed of rivers, lakes and swamps, a little commoner than its cousin
-        {"wels", .50f, gipat, water_fresh | water_swamp, 1, 1, .5f, 1.4f, true, 3.5f, 1.f, .5f, .20f},
+        {"wels", kFishShow * .50f, gipat, water_fresh | water_swamp, 1, 1, .5f, 1.4f, true, 3.5f, 1.f, .5f, .20f},
         // Suslanger's colourful warm-water fish (user, 2026-11-14; approved preview 9): a jewel cichlid in
         // small groups, a rosy barb in quick flashing shoals, a blue panchax near the surface
-        {"jewel cichlid", .16f, suslanger, water_fresh, 3, 6, .25f, .7f, false, 4.f, 1.f, 1.f, .50f},
-        {"rosy barb", .13f, suslanger, water_fresh, 8, 16, .2f, .6f, false, 4.f, 1.4f, 1.2f, .85f},
-        {"panchax", .13f, suslanger, water_fresh, 4, 8, .1f, .35f, false, 4.f, 1.f, 1.f, .70f},
+        {"jewel cichlid", kFishShow * .16f, suslanger, water_fresh, 3, 6, .25f, .7f, false, 4.f, 1.f, 1.f, .50f},
+        {"rosy barb", kFishShow * .13f, suslanger, water_fresh, 8, 16, .2f, .6f, false, 4.f, 1.4f, 1.2f, .85f},
+        {"panchax", kFishShow * .13f, suslanger, water_fresh, 4, 8, .1f, .35f, false, 4.f, 1.f, 1.f, .70f},
     };
     return rules[f < fish_count ? f : 0];
 }

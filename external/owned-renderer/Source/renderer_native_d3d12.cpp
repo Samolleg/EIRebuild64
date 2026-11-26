@@ -15,6 +15,7 @@
 #include "renderer_internal.h"
 #include "world_texture_sampler.h"
 #include "contact_blend.h"
+#include "liquid_surf.h"
 #include "terrain2.h"
 #include "texture_mips.h"
 #include "owned_asset_loader.h"
@@ -91,6 +92,17 @@ constexpr char kD3D12MipShader[] =
 " mipTarget[id.xy]=(mipSource[a]+mipSource[uint2(b.x,a.y)]+mipSource[uint2(a.x,b.y)]+mipSource[b])*.25;}\n";
 const ShaderProgram kD3D12MipProgram{{kD3D12MipShader, sizeof(kD3D12MipShader) - 1}, nullptr, nullptr, "mipBoxCS", "cs_5_0",
                                      D3DCOMPILE_OPTIMIZATION_LEVEL3};
+// A save picture (#342, D3D12Frame::read_scaled): the whole source scaled to
+// the target's size, nearest texel at the game's stretched-Blt mapping
+// (capture_stretch_source_point: x * source / target), channels swapped so the
+// R8G8B8A8 target holds B, G, R, A bytes.
+constexpr char kD3D12StretchShader[] =
+"Texture2D<float4> stretchSource:register(t0);RWTexture2D<float4> stretchTarget:register(u0);\n"
+"[numthreads(8,8,1)]void stretchNearestCS(uint3 id:SV_DispatchThreadID){\n"
+" uint w,h,sw,sh;stretchTarget.GetDimensions(w,h);stretchSource.GetDimensions(sw,sh);if(id.x>=w||id.y>=h)return;\n"
+" stretchTarget[id.xy]=stretchSource[min(id.xy*uint2(sw,sh)/uint2(w,h),uint2(sw-1,sh-1))].bgra;}\n";
+const ShaderProgram kD3D12StretchProgram{{kD3D12StretchShader, sizeof(kD3D12StretchShader) - 1}, nullptr, nullptr, "stretchNearestCS",
+                                         "cs_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3};
 // The same for one slice of an array (its views hold that slice alone).
 constexpr char kD3D12MipArrayShader[] =
 "Texture2DArray<float4> mipSource:register(t0);RWTexture2DArray<float4> mipTarget:register(u0);\n"
@@ -258,7 +270,7 @@ struct RaytracingRepackJob{
 // Match NativeWorldStateGpu including sknLod: DXIL uses the declared structure stride.
 constexpr char kRaytracingProbeShader[] =
 "struct RtProbe{uint state;uint2 generation;uint probePadding;};\n"
-"struct RtWorldState{uint2 geometry;uint2 pose;uint sknLod;uint preparations;uint components;};\n"
+"struct RtWorldState{uint2 geometry;uint2 pose;uint sknLod;uint faultCorners;uint faultComponent;};\n"
 "cbuffer RtProbeConstants:register(b12){uint rtProbeCount;uint3 rtProbePadding;};\n"
 "StructuredBuffer<RtProbe> rtProbes:register(t40);\n"
 "StructuredBuffer<RtWorldState> rtWorldStates:register(t60);\n"
@@ -367,14 +379,53 @@ constexpr char kRaytracingHitShader[] =
 "static const float3 rtTerrainUnknown=float3(.30,.27,.20);\n"
 "struct RtHit{bool hit;float t;float3 position;float3 normal;float3 albedo;float3 emissive;uint profile;uint kind;float2 uv;bool under;};\n"
 "float rtCardLod(float t){return clamp(log2(max(t,1e-3)/20),0,3);}\n"
-"bool rtCardOpaque(uint id,uint geometry,uint primitive,float2 b,float t){\n"
+"// Fire burn (renderer_fire_burn.cpp, #254): a burnt crown's lost leaves let\n"
+"// these rays through, as the raster passes and the traced sun drop them\n"
+"// (native_shader.h nativeBurnLeafAlpha on labelled foliage, by its crown\n"
+"// burn). No burn: the mask is unbound and one GetDimensions decides.\n"
+"Texture2D<float4> rtBurnMask:register(t72);\n"
+"Texture2D<uint> rtBurnMaterials:register(t74);\n"
+"// reference: the record's texture word; bit 31 marks a leaf part (the\n"
+"// renderer's foliage flag): it takes the crown burn without the labels.\n"
+"// The raster leaf loss's patch threshold (native_shader.h nativeBurnLeafAlpha:\n"
+"// nativeSnowNoise, the same hash), so a needle patch and its traced shadow\n"
+"// go at the same char (user, cand-1128: fir shadows outlived the needles).\n"
+"float rtLeafHash(float2 c){uint2 q=uint2(int2(c));uint h=q.x*0x8da6b343u^q.y*0xd8163841u;\n"
+" h^=h>>16;h*=0x7feb352du;h^=h>>15;h*=0x846ca68bu;h^=h>>16;return (h&0xffffffu)/16777216.0;}\n"
+"float rtLeafNoise(float2 p){float2 i=floor(p),f=p-i;f=f*f*(3-2*f);\n"
+" return lerp(lerp(rtLeafHash(i),rtLeafHash(i+float2(1,0)),f.x),lerp(rtLeafHash(i+float2(0,1)),rtLeafHash(i+1),f.x),f.y);}\n"
+"float rtBurnLeafAlpha(float alpha,uint reference,float2 uv,float3 p){\n"
+" uint w,h;rtBurnMask.GetDimensions(w,h);\n"
+" if(h<2)return alpha;\n"
+" const float4 now=rtBurnMask.Load(int3(0,h-1,0));\n"
+" if(rtBurnMask.Load(int3(1,h-1,0)).w<=0)return alpha;\n"
+" const float2 crown=rtBurnMask.Load(int3(clamp(int2(floor(p.xy*now.y)),int2(0,0),int2(w-1,h-2)),0)).ba;\n"
+" if(crown.y<=0||now.x<crown.x)return alpha;\n"
+" const float crownBurn=crown.y>1.5?crown.y-2:crown.y; // a tall tree's crown is coded 2 + burn\n"
+" [branch]if((reference>>31)==0u){\n"
+"  reference&=0x7FFFFFFFu;\n"
+"  uint tw,th;rtBurnMaterials.GetDimensions(tw,th);\n"
+"  if(tw==0||reference/1024u>=th)return alpha;\n"
+" const uint index=rtBurnMaterials.Load(int3(reference%1024u,reference/1024u,0));\n"
+" if(index==0)return alpha;\n"
+" Texture2D<uint> labels=ResourceDescriptorHeap[NonUniformResourceIndex(index)];\n"
+" labels.GetDimensions(tw,th);\n"
+"  if(labels.Load(int3(min(uint2(frac(uv)*float2(tw,th)),uint2(tw-1,th-1)),0))!=2u)return alpha;\n"
+" }\n"
+"// Any crown burn at the hit is the whole burn, as the raster's\n"
+"// (nativeBurnPlantAt: a stamped crown point counts fully); scaling by the\n"
+"// disk's fading rim kept the outer needles' shadow (user, cand-1128).\n"
+" const float charred=smoothstep(0,.6*max(now.z,.5),now.x-crown.x)+(rtLeafNoise(p.xy*1.3+p.z*.9+57)-.5)*.6;\n"
+" return alpha*(1-smoothstep(.35,.95,charred));\n"
+"}\n"
+"bool rtCardOpaque(uint id,uint geometry,uint primitive,float2 b,float t,float3 p){\n"
 " uint4 record=rtRecords.Load4(32+(id+geometry)*16);\n"
 " uint3 corner=rtIndices.Load3((record.y+primitive)*12);\n"
 " float2 uv=asfloat(rtVertices.Load2((record.x+corner.x)*20+12))*(1-b.x-b.y)+\n"
 "           asfloat(rtVertices.Load2((record.x+corner.y)*20+12))*b.x+\n"
 "           asfloat(rtVertices.Load2((record.x+corner.z)*20+12))*b.y;\n"
-" Texture2D card=ResourceDescriptorHeap[NonUniformResourceIndex(record.z)];\n"
-" return card.SampleLevel(rtCardSampler,uv,rtCardLod(t)).a>=asfloat(record.w);\n"
+" Texture2D card=ResourceDescriptorHeap[NonUniformResourceIndex(record.z&0x7FFFFFFFu)];\n"
+" return rtBurnLeafAlpha(card.SampleLevel(rtCardSampler,uv,rtCardLod(t)).a,record.z,uv,p)>=asfloat(record.w);\n"
 "}\n"
 "float3 rtTerrainAlbedo(float2 xy){\n"
 " float4 head=rtTerrainParams[0];\n"
@@ -397,7 +448,7 @@ constexpr char kRaytracingHitShader[] =
 " while(query.Proceed()){\n"
 "  if(query.CandidateType()!=CANDIDATE_NON_OPAQUE_TRIANGLE)continue;\n"
 "  if(rtCardOpaque(query.CandidateInstanceID(),query.CandidateGeometryIndex(),query.CandidatePrimitiveIndex(),\n"
-"   query.CandidateTriangleBarycentrics(),query.CandidateTriangleRayT()))query.CommitNonOpaqueTriangleHit();\n"
+"   query.CandidateTriangleBarycentrics(),query.CandidateTriangleRayT(),origin+direction*query.CandidateTriangleRayT()))query.CommitNonOpaqueTriangleHit();\n"
 " }\n"
 " RtHit h=(RtHit)0;\n"
 " if(query.CommittedStatus()!=COMMITTED_TRIANGLE_HIT)return h;\n"
@@ -447,7 +498,7 @@ constexpr char kRaytracingHitShader[] =
 " while(query.Proceed()){\n"
 "  if(query.CandidateType()!=CANDIDATE_NON_OPAQUE_TRIANGLE)continue;\n"
 "  if(rtCardOpaque(query.CandidateInstanceID(),query.CandidateGeometryIndex(),query.CandidatePrimitiveIndex(),\n"
-"   query.CandidateTriangleBarycentrics(),query.CandidateTriangleRayT()))query.CommitNonOpaqueTriangleHit();\n"
+"   query.CandidateTriangleBarycentrics(),query.CandidateTriangleRayT(),origin+direction*query.CandidateTriangleRayT()))query.CommitNonOpaqueTriangleHit();\n"
 " }\n"
 " return query.CommittedStatus()==COMMITTED_TRIANGLE_HIT?0:1;\n"
 "}\n"
@@ -493,6 +544,10 @@ enum : std::size_t { kRtDebugVertex, kRtDebugPixel, kRtRepack, kRtSunMask, kRtPr
 // After kRtPrograms: rt_term_view's program, then the depth prepass of traced
 // sun frames (append_raytracing_shader_programs).
 constexpr std::size_t kRtPrepass=kRtPrograms+1;
+// Then the units' penumbra filter of traced sun frames (nativeRtUnitFilterPS).
+constexpr std::size_t kRtUnitFilter=kRtPrograms+2;
+// And its first, horizontal pass (nativeRtUnitBlurXPS).
+constexpr std::size_t kRtUnitBlurX=kRtPrograms+3;
 // A hit's shading words (Renderer::RaytracingD3D12::shade) from its record's draw.
 constexpr std::size_t kRtShadeWords = 4;
 constexpr std::uint32_t kRtTerrainInstance = 0x800000u, kRtFigureInstance = 0x400000u;
@@ -575,6 +630,30 @@ constexpr char kRtDirectShader[] =
 "ByteAddressBuffer rdSceneVertices:register(t95);\n"
 "ByteAddressBuffer rdSceneIndices:register(t99);\n"
 "ByteAddressBuffer rdSceneRecords:register(t113);\n"
+"// Fire burn: the burn mask (row h-1: now, texels per metre, crown seconds;\n"
+"// row 1 .w active). A leaf part (record.z bit 31) of a burnt crown lets the\n"
+"// lamp's shadow ray through as its leaves are lost (native_shader.h\n"
+"// nativeBurnLeafAlpha). Unbound without a burn: one GetDimensions.\n"
+"Texture2D<float4> rdBurnMask:register(t72);\n"
+"// The raster leaf loss's patch threshold (native_shader.h nativeBurnLeafAlpha:\n"
+"// nativeSnowNoise, the same hash), so a needle patch and its traced shadow\n"
+"// go at the same char (user, cand-1128: fir shadows outlived the needles).\n"
+"float rdLeafHash(float2 c){uint2 q=uint2(int2(c));uint h=q.x*0x8da6b343u^q.y*0xd8163841u;\n"
+" h^=h>>16;h*=0x7feb352du;h^=h>>15;h*=0x846ca68bu;h^=h>>16;return (h&0xffffffu)/16777216.0;}\n"
+"float rdLeafNoise(float2 p){float2 i=floor(p),f=p-i;f=f*f*(3-2*f);\n"
+" return lerp(lerp(rdLeafHash(i),rdLeafHash(i+float2(1,0)),f.x),lerp(rdLeafHash(i+float2(0,1)),rdLeafHash(i+1),f.x),f.y);}\n"
+"float rdBurnLeafAlpha(float alpha,uint reference,float3 p){\n"
+" if((reference>>31)==0u)return alpha;\n"
+" uint w,h;rdBurnMask.GetDimensions(w,h);\n"
+" if(h<2)return alpha;\n"
+" const float4 now=rdBurnMask.Load(int3(0,h-1,0));\n"
+" if(rdBurnMask.Load(int3(1,h-1,0)).w<=0)return alpha;\n"
+" float2 crown=rdBurnMask.Load(int3(clamp(int2(floor(p.xy*now.y)),int2(0,0),int2(w-1,h-2)),0)).ba;\n"
+" if(crown.y>1.5)crown.y-=2;\n"
+" if(crown.y<=0||now.x<crown.x)return alpha;\n"
+" const float charred=smoothstep(0,.6*max(now.z,.5),now.x-crown.x)+(rdLeafNoise(p.xy*1.3+p.z*.9+57)-.5)*.6; // any crown burn is the whole burn, as the raster's\n"
+" return alpha*(1-smoothstep(.35,.95,charred));\n"
+"}\n"
 "SamplerState rdCardSampler:register(s0);\n"
 "RWStructuredBuffer<RTXDI_PackedDIReservoir> rdReservoirs:register(u0);\n"
 "#ifdef RT_DIRECT_SHADE\n"
@@ -629,7 +708,7 @@ constexpr char kRtDirectShader[] =
 "}\n"
 "int2 RAB_ClampSamplePositionIntoView(int2 pixel,bool previousFrame){return clamp(pixel,int2(0,0),int2(rdSizeJitter.xy)-1);}\n"
 "// ---- lights\n"
-"struct RAB_LightInfo{float3 centre;float inverseRadiusSquared;float3 color;float kind;float3 extent;float intensity;float3 target;};\n"
+"struct RAB_LightInfo{float3 centre;float inverseRadiusSquared;float3 color;float kind;float3 extent;float intensity;float3 target;float sphere;};\n"
 "struct RAB_LightSample{float3 position;float3 direction;float3 radiance;float kind;float intensity;};\n"
 "RAB_LightInfo RAB_EmptyLightInfo(){RAB_LightInfo light=(RAB_LightInfo)0;return light;}\n"
 "RAB_LightSample RAB_EmptyLightSample(){RAB_LightSample s=(RAB_LightSample)0;return s;}\n"
@@ -646,7 +725,7 @@ constexpr char kRtDirectShader[] =
 " if(index>=rdFrame.y)return light;\n"
 " RdLight l=rdLights[index];\n"
 " light.centre=l.centre;light.inverseRadiusSquared=l.inverseRadiusSquared;light.color=l.color;light.kind=l.kind;\n"
-" light.extent=l.extent;light.intensity=l.intensity;light.target=l.target;\n"
+" light.extent=l.extent;light.intensity=l.intensity;light.target=l.target;light.sphere=l.lightPadding;\n"
 " return light;\n"
 "}\n"
 "RAB_LightInfo RAB_LoadCompactLightInfo(uint index){return RAB_EmptyLightInfo();}\n"
@@ -661,6 +740,9 @@ constexpr char kRtDirectShader[] =
 " if(light.kind<.5){\n"
 "  float z=1-2*uv.x,r=sqrt(saturate(1-z*z)),a=6.2831853*uv.y;\n"
 "  s.position=light.target+light.extent.x*float3(r*cos(a),r*sin(a),z);\n"
+"  // A buff or sparkle cloud (#263): its light arrives from the sampled point of its sphere, so a\n"
+"  // surface inside the cloud is lit from all round, not only toward the centre.\n"
+"  if(light.sphere>.5)s.direction=normalize(s.position-surface.worldPos);\n"
 " }else s.position=light.target+float3((uv*2-1)*light.extent.xy,0);\n"
 " return s;\n"
 "}\n"
@@ -705,8 +787,9 @@ constexpr char kRtDirectShader[] =
 "  float2 uv=asfloat(rdSceneVertices.Load2((record.x+corner.x)*20+12))*(1-b.x-b.y)+\n"
 "            asfloat(rdSceneVertices.Load2((record.x+corner.y)*20+12))*b.x+\n"
 "            asfloat(rdSceneVertices.Load2((record.x+corner.z)*20+12))*b.y;\n"
-"  Texture2D card=ResourceDescriptorHeap[NonUniformResourceIndex(record.z)];\n"
-"  if(card.SampleLevel(rdCardSampler,uv,1).a>=asfloat(record.w))query.CommitNonOpaqueTriangleHit();\n"
+"  Texture2D card=ResourceDescriptorHeap[NonUniformResourceIndex(record.z&0x7FFFFFFFu)];\n"
+"  const float3 hit=ray.Origin+ray.Direction*query.CandidateTriangleRayT();\n"
+"  if(rdBurnLeafAlpha(card.SampleLevel(rdCardSampler,uv,1).a,record.z,hit)>=asfloat(record.w))query.CommitNonOpaqueTriangleHit();\n"
 " }\n"
 " return query.CommittedStatus()!=COMMITTED_TRIANGLE_HIT;\n"
 "}\n"
@@ -954,8 +1037,7 @@ constexpr char kRtIndirectShader[] = R"hlsl(
 cbuffer RtIndirectConstants:register(b1){row_major float4x4 riClipToWorld;row_major float4x4 riWorldToClip;
  row_major float4x4 riPreviousClipToWorld;row_major float4x4 riPreviousWorldToClip;
  float4 riEye;float4 riPreviousEye;float4 riSizeJitter;float4 riPreviousJitter;float4 riSun;float4 riSunDiffuse;
- uint4 riFrame;uint4 riReservoir;uint4 riOffsets;uint4 riCounts;float4 riSpatial;float4 riAo;float4 riReuse;uint4 riLava;float4 riLavaReach;
- uint4 riAoOffsets;}; // half-size AO's selected render pixel: this frame, previous frame
+ uint4 riFrame;uint4 riReservoir;uint4 riOffsets;uint4 riCounts;float4 riSpatial;float4 riAo;float4 riReuse;uint4 riLava;float4 riLavaReach;};
 Texture2D<float> riDepth:register(t0);
 Texture2D<float4> riGuideNormal:register(t1);
 Texture2D<float4> riGuideDiffuse:register(t2);
@@ -980,10 +1062,8 @@ RWTexture2D<float4> riOutput:register(u1);
 RWTexture2D<uint2> riSurfaceOutput:register(u1);
 #ifdef RT_INDIRECT_AO
 Texture2D<float2> riAoPrevious:register(t9);
-Texture2D<uint2> riAoPreviousSurfaces:register(t10);
 RWTexture2D<float2> riAoHistory:register(u2);
 RWTexture2D<float2> riAoOutput:register(u3);
-RWTexture2D<uint2> riAoSurfaceOutput:register(u4);
 #endif
 #endif
 static const float riPi=3.14159265;
@@ -1112,6 +1192,12 @@ groupshared float riGroupLuma[64];
   int2 base=int2(floor(at));
   float2 f=at-float2(base);
   float reach=.05+.02*surface.linearDepth,total=0;
+  // riFrame.y bit 64 (rt_indirect_rr_half, under Ray Reconstruction at half size): the pixel takes one of
+  // its four half pixels' samples, chosen by weight (the blend's expectation), not their blend: each render
+  // pixel then carries one sample of its own, the independent per-pixel samples Ray Reconstruction expects.
+  const bool pickOne=(riFrame.y&64u)!=0;
+  RTXDI_RandomSamplerState pickRng=RTXDI_InitRandomSampler(uint2(pixel),riFrame.x,7u);
+  float3 picked=0;
   // At the full render size (riReuse.y 1) a pixel has its own reservoir.
   for(uint k=0;k<(riReuse.y>1?4u:1u);++k){
    int2 q=base+int2(k&1u,k>>1);
@@ -1124,12 +1210,16 @@ groupshared float riGroupLuma[64];
    total+=weight;
    uint misc;
    RTXDI_GIReservoir reservoir=RTXDI_LoadGIReservoir(riBuffer(),uint2(q),0,misc);
-   if(!RTXDI_IsValidGIReservoir(reservoir)||(misc&0x10000u)!=0||!(reservoir.weightSum>0))continue;
-   float3 toSample=reservoir.position-surface.worldPos;
-   float cosine=saturate(dot(surface.normal,toSample*rsqrt(max(dot(toSample,toSample),1e-12))));
-   indirect+=reservoir.radiance*(weight*cosine/riPi*reservoir.weightSum);
+   float3 sample=0;
+   if(RTXDI_IsValidGIReservoir(reservoir)&&(misc&0x10000u)==0&&reservoir.weightSum>0){
+    float3 toSample=reservoir.position-surface.worldPos;
+    float cosine=saturate(dot(surface.normal,toSample*rsqrt(max(dot(toSample,toSample),1e-12))));
+    sample=reservoir.radiance*(cosine/riPi*reservoir.weightSum);
+   }
+   if(pickOne){if(RTXDI_GetNextRandom(pickRng)*total<weight)picked=sample;}
+   else indirect+=sample*weight;
   }
-  indirect=total>0?indirect/total:riVolume(surface.worldPos,surface.normal);
+  indirect=total>0?(pickOne?picked:indirect/total):riVolume(surface.worldPos,surface.normal);
   if(any(isnan(indirect))||any(isinf(indirect)))indirect=0;
   indirect=clamp(indirect,0,2);
  }
@@ -1227,54 +1317,32 @@ DnSurface dnSurface(uint2 packed,int2 pixel,bool previous){
  dnHistoryOutput[pixel]=float4(colour,frames);dnMomentsOutput[pixel]=moments;dnOutput[pixel]=float4(colour,variance);
 }
 #else
-// The same 5x5 filter, but decode each tile surface once, not once per tap
-// per output pixel. Specialising the three strides keeps the shared allocation
-// at 9.4 / 15 / 30 KiB, rather than reserving the largest halo for every pass.
-#define DN_TILE_WIDTH (16+4*RT_INDIRECT_ATROUS_STEP)
-#define DN_TILE_HEIGHT (8+4*RT_INDIRECT_ATROUS_STEP)
-groupshared float4 dnTileColour[DN_TILE_WIDTH*DN_TILE_HEIGHT];
-groupshared float3 dnTileNormal[DN_TILE_WIDTH*DN_TILE_HEIGHT];
-groupshared float3 dnTilePosition[DN_TILE_WIDTH*DN_TILE_HEIGHT];
-[numthreads(16,8,1)]void rtIndirectAtrousCS(uint3 id:SV_DispatchThreadID,uint3 local:SV_GroupThreadID,uint groupIndex:SV_GroupIndex){
- const int border=2*RT_INDIRECT_ATROUS_STEP;
- int2 origin=int2(id.xy)-int2(local.xy)-border,last=int2(riSizeJitter.xy)-1;
- for(uint k=groupIndex;k<DN_TILE_WIDTH*DN_TILE_HEIGHT;k+=128u){
-  int2 q=clamp(origin+int2(k%DN_TILE_WIDTH,k/DN_TILE_WIDTH),0,last);
-  uint2 p=dnPacked.Load(int3(q,0));
-  DnSurface s=(DnSurface)0;
-  if(asfloat(p.x)>0)s=dnSurface(p,q,false);
-  dnTileColour[k]=dnInput.Load(int3(q,0));
-  dnTileNormal[k]=s.normal;
-  dnTilePosition[k]=s.position;
- }
- GroupMemoryBarrierWithGroupSync(); // including lanes outside an odd-sized image
+[numthreads(8,8,1)]void rtIndirectAtrousCS(uint3 id:SV_DispatchThreadID){
  if(any(id.xy>=uint2(riSizeJitter.xy)))return;
  int2 pixel=int2(id.xy);
- int centreIndex=(int(local.y)+border)*DN_TILE_WIDTH+int(local.x)+border;
- float4 centre=dnTileColour[centreIndex];
- float3 normal=dnTileNormal[centreIndex],position=dnTilePosition[centreIndex];
- if(!any(normal)){dnOutput[pixel]=dnStep.y!=0?float4(0,0,0,1):0;return;}
- float depth=asfloat(dnPacked.Load(int3(pixel,0)).x);
+ uint2 packed=dnPacked.Load(int3(pixel,0));
+ float4 centre=dnInput.Load(int3(pixel,0));
+ if(!(asfloat(packed.x)>0)){dnOutput[pixel]=dnStep.y!=0?float4(0,0,0,1):0;return;}
+ DnSurface surface=dnSurface(packed,pixel,false);
+ int2 last=int2(riSizeJitter.xy)-1;
  // The luminance's stopping width from the variance's 3x3 mean.
  float variance=0;
- [unroll]
  for(int y=-1;y<=1;++y)for(int x=-1;x<=1;++x)
-  variance+=dnTileColour[centreIndex+y*DN_TILE_WIDTH+x].a*(x==0?.5:.25)*(y==0?.5:.25);
+  variance+=dnInput.Load(int3(clamp(pixel+int2(x,y),0,last),0)).a*(x==0?.5:.25)*(y==0?.5:.25);
  float width=4*sqrt(max(variance,0))+1e-3,luma=dnLuma(centre.rgb);
- float reach=(.05+.02*depth)*float(RT_INDIRECT_ATROUS_STEP);
+ float reach=(.05+.02*surface.depth)*float(dnStep.x);
  const float kernel[3]={.375,.25,.0625};
  float3 sum=0;float sumVariance=0,total=0;
- [unroll]
  for(int j=-2;j<=2;++j)for(int i=-2;i<=2;++i){
-  int2 q=pixel+int2(i,j)*RT_INDIRECT_ATROUS_STEP;
+  int2 q=pixel+int2(i,j)*int(dnStep.x);
   if(any(q<0)||any(q>last))continue;
-  int tap=centreIndex+(j*DN_TILE_WIDTH+i)*RT_INDIRECT_ATROUS_STEP;
-  float3 otherNormal=dnTileNormal[tap];
-  if(!any(otherNormal))continue;
-  float4 c=dnTileColour[tap];
-  float facing=saturate(dot(normal,otherNormal));
+  uint2 other=dnPacked.Load(int3(q,0));
+  if(!(asfloat(other.x)>0))continue;
+  DnSurface o=dnSurface(other,q,false);
+  float4 c=dnInput.Load(int3(q,0));
+  float facing=saturate(dot(surface.normal,o.normal));
   float weight=kernel[abs(i)]*kernel[abs(j)]*pow(facing,32)*
-   exp(-abs(dot(dnTilePosition[tap]-position,normal))/reach-abs(dnLuma(c.rgb)-luma)/width);
+   exp(-abs(dot(o.position-surface.position,surface.normal))/reach-abs(dnLuma(c.rgb)-luma)/width);
   sum+=c.rgb*weight;sumVariance+=c.a*weight*weight;total+=weight;
  }
  float4 result=total>0?float4(sum/total,sumVariance/(total*total)):centre;
@@ -1343,7 +1411,10 @@ float3 riHitLight(RtHit h,inout RTXDI_RandomSamplerState rng){
   if(!(reach>0))continue;
   float incidence=dot(h.normal,delta*rsqrt(max(dot(delta,delta),1e-12)));
   // The lamp loop's facing rule (native_shader.h nativePointLighting): the ground keeps grazing light.
-  float facing=h.kind==1?saturate(1+min(incidence,0)):max(incidence,0);
+  // A buff or sparkle cloud (-shadowCenter.w its radius, #263): the lamp loop's sphere term.
+  float sphere=max(-lamp.shadowCenter.w,0),distance=length(delta),wrap=min(sphere/max(distance,1e-4),1);
+  float facing=h.kind==1?saturate(1+min(incidence,0)):
+   max(saturate((incidence+wrap)/(1+wrap)),saturate((sphere-distance)/max(sphere,1e-4)));
   float3 response=lamp.color.rgb*(reach*reach*(lamp.color.w<0?saturate(incidence*.6+.4):facing*(lamp.color.w>0?.65:1)));
   float weight=dot(response,float3(.2126,.7152,.0722));
   if(!(weight>0))continue;
@@ -1471,32 +1542,20 @@ bool riLavaCrossed(float3 origin,float3 direction,inout float limit,out float3 c
  RTXDI_GIBoilingFilter(local.xy,riSpatial.w,reservoir);
  if(inside&&(riFrame.y&32u)==0)RTXDI_StoreGIReservoir(reservoir,riBuffer(),id.xy,1);
 #ifdef RT_INDIRECT_AO
- // Full-size bounce already traced the same cosine-distributed visibility estimator.
- // Only the selected pixel of each AO quad updates its half-size history. The
- // bounce RNG and reservoirs stay untouched; AO takes that pixel's fresh ray.
- bool separateAoGrid=riReuse.y==1;
- int2 aoPixel=separateAoGrid?pixel/2:pixel;
- int2 aoLast=int2(riSizeJitter.xy)-1;
- bool aoSelected=!separateAoGrid||all(pixel==min(aoPixel*2+int2(riAoOffsets.xy),aoLast));
- if(inside&&aoSelected){
-  int2 aoSize=separateAoGrid?(int2(riSizeJitter.xy)+1)/2:int2(riHalfSize());
-  float2 aoMotion=separateAoGrid?(float2(pixel)+motion.xy-float2(riAoOffsets.zw))*.5-float2(aoPixel):motion.xy;
-  if(separateAoGrid)riAoSurfaceOutput[aoPixel]=riPackPixel(pixel);
+ if(inside){
   float2 history=float2(1,0),shown=float2(1,65000); // no lit surface: unoccluded, the ambient occlusion passes' sky depth
   // The cover (both the terrain and the unit flag) keeps the sky's value: its blades are not in the scene,
   // and the screen-space contact layer is its occlusion.
   if(RAB_IsSurfaceValid(surface)&&(surface.flags&6u)!=6u){
    float sum=0,frames=0,total=0;
    if((riFrame.y&16u)!=0){
-    float2 at=float2(aoPixel)+aoMotion;
+    float2 at=float2(pixel)+motion.xy;
     int2 base=int2(floor(at));
     float2 f=at-float2(base);
     for(uint k=0;k<4;++k){
      int2 q=base+int2(k&1u,k>>1);
-     if(any(q<0)||any(q>=aoSize))continue;
-     uint2 beforePacked=separateAoGrid?riAoPreviousSurfaces.Load(int3(q,0)):riPreviousSurfaces.Load(int3(q,0));
-     int2 beforeFull=separateAoGrid?min(q*2+int2(riAoOffsets.zw),aoLast):riFull(q,true);
-     RAB_Surface before=riSurfaceAt(beforePacked,beforeFull,true);
+     if(any(q<0)||any(q>=int2(riHalfSize())))continue;
+     RAB_Surface before=riSurfaceAt(riPreviousSurfaces.Load(int3(q,0)),riFull(q,true),true);
      if(!RAB_IsSurfaceValid(before)||dot(before.normal,surface.normal)<.9||
         abs(before.linearDepth-(surface.linearDepth+motion.z))>riSpatial.y*surface.linearDepth)continue;
      float weight=((k&1u)!=0?f.x:1-f.x)*((k>>1)!=0?f.y:1-f.y)+.01;
@@ -1513,7 +1572,7 @@ bool riLavaCrossed(float3 origin,float3 direction,inout float limit,out float3 c
    if(any(isnan(history)))history=float2(1,0);
    shown=float2(saturate(history.x),surface.linearDepth);
   }
-  riAoHistory[aoPixel]=history;riAoOutput[aoPixel]=shown;
+  riAoHistory[pixel]=history;riAoOutput[pixel]=shown;
  }
 #endif
 }
@@ -1535,16 +1594,14 @@ const std::string& rt_indirect_source(){
  return source;
 }
 // append_rt_indirect_shader_programs order.
-enum : std::size_t { kRtIndirectSample, kRtIndirectSpatial, kRtIndirectShade, kRtIndirectAdd, kRtIndirectSampleAo, kRtIndirectTemporal, kRtIndirectAtrous, kRtIndirectAtrous2, kRtIndirectAtrous4, kRtIndirectPrograms };
+enum : std::size_t { kRtIndirectSample, kRtIndirectSpatial, kRtIndirectShade, kRtIndirectAdd, kRtIndirectSampleAo, kRtIndirectTemporal, kRtIndirectAtrous, kRtIndirectPrograms };
 void append_rt_indirect_shader_programs(std::vector<ShaderProgram>& out){
  static const D3D_SHADER_MACRO sample[]={{"RTXDI_SDK","1"},{nullptr,nullptr}};
  static const D3D_SHADER_MACRO spatial[]={{"RTXDI_SDK","1"},{"RT_INDIRECT_SPATIAL","1"},{nullptr,nullptr}};
  static const D3D_SHADER_MACRO shade[]={{"RTXDI_SDK","1"},{"RT_INDIRECT_SHADE","1"},{nullptr,nullptr}};
  static const D3D_SHADER_MACRO sample_ao[]={{"RTXDI_SDK","1"},{"RT_INDIRECT_AO","1"},{nullptr,nullptr}}; // rt_ambient_occlusion: the sampling pass with its ray's occlusion
  static const D3D_SHADER_MACRO temporal[]={{"RTXDI_SDK","1"},{"RT_INDIRECT_DENOISE","1"},{"RT_INDIRECT_TEMPORAL","1"},{nullptr,nullptr}}; // rt_indirect_denoise
- static const D3D_SHADER_MACRO atrous[]={{"RTXDI_SDK","1"},{"RT_INDIRECT_DENOISE","1"},{"RT_INDIRECT_ATROUS_STEP","1"},{nullptr,nullptr}};
- static const D3D_SHADER_MACRO atrous2[]={{"RTXDI_SDK","1"},{"RT_INDIRECT_DENOISE","1"},{"RT_INDIRECT_ATROUS_STEP","2"},{nullptr,nullptr}};
- static const D3D_SHADER_MACRO atrous4[]={{"RTXDI_SDK","1"},{"RT_INDIRECT_DENOISE","1"},{"RT_INDIRECT_ATROUS_STEP","4"},{nullptr,nullptr}};
+ static const D3D_SHADER_MACRO atrous[]={{"RTXDI_SDK","1"},{"RT_INDIRECT_DENOISE","1"},{nullptr,nullptr}};
  const std::string& source=rt_indirect_source();
  out.push_back({{source.data(),source.size()},nullptr,sample,"rtIndirectSampleCS","cs_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3});
  out.push_back({{source.data(),source.size()},nullptr,spatial,"rtIndirectSpatialCS","cs_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3});
@@ -1553,8 +1610,6 @@ void append_rt_indirect_shader_programs(std::vector<ShaderProgram>& out){
  out.push_back({{source.data(),source.size()},nullptr,sample_ao,"rtIndirectSampleCS","cs_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3});
  out.push_back({{source.data(),source.size()},nullptr,temporal,"rtIndirectTemporalCS","cs_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3});
  out.push_back({{source.data(),source.size()},nullptr,atrous,"rtIndirectAtrousCS","cs_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3});
- out.push_back({{source.data(),source.size()},nullptr,atrous2,"rtIndirectAtrousCS","cs_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3});
- out.push_back({{source.data(),source.size()},nullptr,atrous4,"rtIndirectAtrousCS","cs_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3});
 }
 // rt_indirect_denoise's b2 (kRtIndirectShader RtIndirectDenoise).
 struct RtIndirectDenoiseConstants{
@@ -1602,9 +1657,8 @@ struct RtIndirectConstants{
  float reuse[4];            // x: a new sample's M against the history's; y: render pixels a traced pixel's side (rt_indirect_resolution); z: the outlier clamp's multiple of the group mean (0: none)
  std::uint32_t lava[4];     // rt_emissive: the lava table's tiles across and down, its levels (0: none)
  float lava_reach[4];       // where a lava hit starts to count (metres along the ray), one over the width of that start
- std::uint32_t ao_offsets[4]; // half-size AO's render-pixel offsets, this and last frame (full-size bounce only)
 };
-static_assert(sizeof(RtIndirectConstants)==512);
+static_assert(sizeof(RtIndirectConstants)==496);
 constexpr UINT kRtIndirectReservoirBytes = 32; // RTXDI_PackedGIReservoir
 // rt_reflections (D3D12 only; Renderer::reflections_d3d12 and the water
 // trace of flush_native_d3d12): reflections by rays through the ray tracing
@@ -1930,6 +1984,7 @@ void append_d3d12_shader_programs(std::vector<ShaderProgram>& out) {
  out.push_back(kD3D12SurfaceEffectPS);
  out.push_back(kD3D12MipProgram);
  out.push_back(kD3D12SurfaceCopyProgram);
+ out.push_back(kD3D12StretchProgram);
  out.push_back(kD3D12MipArrayProgram);
  out.push_back(kD3D12MipArrayRangeProgram);
  out.push_back(kUnitMipCopyProgram);out.push_back(kUnitMipHistogramProgram);
@@ -1954,8 +2009,74 @@ void append_d3d12_shader_programs(std::vector<ShaderProgram>& out) {
  append_native_guide_programs(out);        // rt_ray_reconstruction: the guide twins
  append_ground_cover_guide_programs(out);
  append_fire_burn_programs(out);           // fire_burn: the NATIVE_FIRE_BURN twins
+ append_interact_overlay_indexed_programs(out); // Alt interact overlay (#315): indexed batches
 }
+void append_d3d12_program_features(std::vector<std::pair<ShaderProgram,std::uint64_t>>& out) {
+ std::vector<ShaderProgram> list;
+ const auto add = [&](std::uint64_t feature) {
+  for (const ShaderProgram& program : list) out.emplace_back(program, feature);
+  list.clear();
+ };
+ for (std::uint32_t group = 0; group < 32; ++group) { append_shader_groups(1u << group, list); add(1ull << group); }
+ append_raytracing_shader_programs(list);
+ append_rt_direct_shader_programs(list);
+ append_rt_indirect_shader_programs(list);
+ append_rt_reflection_shader_programs(list);
+ add(kD3D12FeatureRayTracing);
+ append_native_guide_programs(list);
+ append_ground_cover_guide_programs(list);
+ add(kD3D12FeatureRtGuides);
+ append_fire_burn_programs(list);
+ add(kD3D12FeatureFireBurn);
+ // The rest of the D3D12 list (mips, gamma, the bake and material variants,
+ // the overlay's indexed programs) serves every setting.
+ append_d3d12_shader_programs(list);
+ add(0);
+}
+
+namespace {
+constexpr char kOverlayCompositeShader[] = R"(
+Texture2D overlayTarget:register(t0);SamplerState overlaySampler:register(s0);
+struct OverlayOut{float4 p:SV_Position;float2 uv:TEXCOORD0;};
+OverlayOut overlayCompositeVS(uint id:SV_VertexID){OverlayOut o;float2 t=float2((id<<1)&2,id&2);o.p=float4(t*float2(2,-2)+float2(-1,1),0,1);o.uv=t;return o;}
+// A subtle fill: the class colour at 45% where a marked object lies.
+float4 overlayCompositePS(OverlayOut i):SV_Target{float4 c=overlayTarget.Sample(overlaySampler,i.uv);return float4(c.rgb,c.a*.45);}
+)";
+} // namespace
+
+void append_interact_overlay_shader_programs(std::vector<ShaderProgram>& out) {
+ static const D3D_SHADER_MACRO overlay[]={{"NATIVE_OVERLAY","1"},{nullptr,nullptr}};
+ const std::string& source=owned_native_shader_source();
+ out.push_back({source,nullptr,overlay,"nativeOverlayVS","vs_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3});
+ out.push_back({source,nullptr,overlay,"nativeOverlayPS","ps_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3});
+ out.push_back({{kOverlayCompositeShader,sizeof(kOverlayCompositeShader)-1},nullptr,nullptr,"overlayCompositeVS","vs_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3});
+ out.push_back({{kOverlayCompositeShader,sizeof(kOverlayCompositeShader)-1},nullptr,nullptr,"overlayCompositePS","ps_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3});
+}
+// D3D12: the overlay vertex program of indexed batches, per vertex class
+// (the colour pass's native_indexed_vertex_defines domains). DXIL table only:
+// the host runs no program it was not built with (append_d3d12_shader_programs).
+void append_interact_overlay_indexed_programs(std::vector<ShaderProgram>& out) {
+ static const D3D_SHADER_MACRO indexed[kNativeInstanceVertexClasses][4]={
+  {{"NATIVE_OVERLAY","1"},{"NATIVE_DOMAIN","2"},{"NATIVE_INDEXED","1"},{nullptr,nullptr}},
+  {{"NATIVE_OVERLAY","1"},{"NATIVE_DOMAIN","4"},{"NATIVE_INDEXED","1"},{nullptr,nullptr}}};
+ for(std::size_t vertex_class=0;vertex_class<kNativeInstanceVertexClasses;++vertex_class)
+  out.push_back({owned_native_shader_source(),nullptr,indexed[vertex_class],"nativeOverlayVS","vs_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3});
+}
+
+#ifndef EID3D11_SHADER_EMBED
+std::uint64_t d3d12_features_for_settings(const RendererConfig& config, bool raytracing_hardware) {
+ std::uint64_t features = shader_groups_for_settings(config, true);
+ if (raytracing_hardware && (rt_scene_wanted(config) || configured_integer(config, "rt_debug_view", 0) > 0)) {
+  features |= kD3D12FeatureRayTracing;
+  if (configured_boolean(config, "rt_ray_reconstruction", false)) features |= kD3D12FeatureRtGuides;
+ }
+ if (configured_boolean(config, "fire_burn", false)) features |= kD3D12FeatureFireBurn;
+ return features;
+}
+#endif
+
 const ShaderProgram& d3d12_mip_program() noexcept { return kD3D12MipProgram; }
+const ShaderProgram& d3d12_stretch_program() noexcept { return kD3D12StretchProgram; }
 const ShaderProgram& d3d12_mip_array_program() noexcept { return kD3D12MipArrayProgram; }
 const ShaderProgram& d3d12_mip_array_range_program() noexcept { return kD3D12MipArrayRangeProgram; }
 
@@ -2159,6 +2280,7 @@ HRESULT Renderer::native_d3d12_ensure(){
     if(native_guide_twinned(program)&&twin<native12_.guides.size())native12_.guide_twins.emplace(&program,&native12_.guides[twin++]);
    if(twin!=native12_.guides.size()){native12_.guide_twins.clear();d3d12_->omit("Ray Reconstruction guide programs (the twin list does not match the native programs)",false);}}
   native12_.tessellation.clear();append_terrain_tessellation_shader_programs(native12_.tessellation);
+  ++world_programs_generation_; // the lists above are new (update_fire_burn_substitutes)
   if(native12_.programs.size()<3){native12_.failed=true;return E_FAIL;}
   // flush_native_d3d12's choices (the rules its per-flush scans had): the
   // first program of each entry and define-name set; the material instance
@@ -2211,6 +2333,27 @@ HRESULT Renderer::native_d3d12_buffer(D3D12BufferRef& buffer,UINT64 bytes,UINT s
  if(buffer&&d3d12_->buffer_bytes(*buffer)>=bytes)return S_OK;
  const UINT64 current=buffer?d3d12_->buffer_bytes(*buffer):0;
  UINT64 target=(std::max<UINT64>)({bytes,current*2,64u*1024u});
+ if(stride)target=(target+stride-1)/stride*stride;
+ D3D12BufferRef created;
+ HRESULT hr=d3d12_->create_buffer(target,stride,flags,created);
+ if(FAILED(hr)&&target!=bytes)hr=d3d12_->create_buffer(bytes,stride,flags,created);
+ if(FAILED(hr))return hr;
+ buffer=std::move(created);
+ return S_OK;
+}
+
+// The world flush's per-frame buffers (contents written and read within the
+// frame's flush): grown to a quarter over the demand (#289: x2 kept
+// zone3obr's draw work at 463 MiB), never made smaller (#289 sizing audit:
+// a shrink in a new map's first frames let a small flush shrink the buffers
+// a larger flush of the same frame then grew again). 0 bytes: keep the
+// buffer as it is (the deferred world flush's second phase reads the first
+// phase's contents).
+HRESULT Renderer::native_d3d12_frame_buffer(D3D12BufferRef& buffer,UINT64 bytes,UINT stride,UINT flags){
+ const UINT64 current=buffer?d3d12_->buffer_bytes(*buffer):0;
+ if(buffer&&current>=bytes)return S_OK;
+ bytes=(std::max<UINT64>)(bytes,16);
+ UINT64 target=(std::max<UINT64>)(bytes+bytes/4,64u*1024u);
  if(stride)target=(target+stride-1)/stride*stride;
  D3D12BufferRef created;
  HRESULT hr=d3d12_->create_buffer(target,stride,flags,created);
@@ -2480,13 +2623,13 @@ void Renderer::bake_terrain2_heights_d3d12(Terrain2Map& map,const ContactBlendMa
  if(!stopped&&map.mips12){
   const HRESULT mips=d3d12_->generate_mips(*map.height12,d3d12_mip_array_range_program(),0,(std::max)(1u,contact.slices));
   if(FAILED(mips)){hr=mips;return fail("height levels");}
-  if(mips==S_OK){map.mips12=false;++terrain2_cache_revision_;}else map.dirty=true;
+  if(mips==S_OK){map.mips12=false;++terrain2_cache_revision_;++map.revision;}else map.dirty=true;
  }
  if(baked){
   char text[224];std::snprintf(text,sizeof(text),"map=%s cells=%zu baked=%zu array=%ux%ux%u (%.1f MB) backend=D3D12",name,baked,map.baked.size(),
    width,height,(std::max)(1u,contact.slices),double(width)*height*(std::max)(1u,contact.slices)*4/3/1048576.0);
   bridge_append_probe_event("terrain2_heights",text);
-  ++terrain2_cache_revision_; // the material cache bakes again with the new heights
+  ++terrain2_cache_revision_;++map.revision; // the material cache bakes again with the new heights
  }
 }catch(...){}
 
@@ -2618,7 +2761,8 @@ void Renderer::add_neighbour_blend_maps_d3d12(const NeighbourPiece& upload,const
      terrain_tile_sand_slots(inputs->families),terrain_tile_bare_corners(inputs->families),terrain_tile_soft_sand_corners(inputs->families)):
      std::vector<std::uint16_t>(grids.types.begin(),grids.types.end());
    auto& map=n.cover12;
-   if(FAILED(build_ground_cover_map_d3d12(map,tx,ty,2,grids.area,grids.height,grids.ground,types,grids.types,inputs->tiles,inputs->used,inputs->trees))){
+   if(FAILED(build_ground_cover_map_d3d12(map,tx,ty,2,grids.area,grids.height,grids.ground,types,grids.types,inputs->tiles,inputs->used,inputs->trees,
+     liquid_surf_map_takes_sea(n.name,liquid_lake_maps())))){
     n.cover12={};report("ground_cover=omitted reason=grid_upload_failed");
    }else{
     map.atlases.resize(map.paint.size());
@@ -2654,6 +2798,7 @@ HRESULT Renderer::update_contact_maps_d3d12(){
   if(!tiles_x||!tiles_y)return S_OK;
   HRESULT hr=build_contact_tiles(terrain,tiles_x,tiles_y,contact_maps_,&contact_tile_rows_);
   if(FAILED(hr))return hr;
+  contact_used_=contact_maps_.pending;contact_map_begin_=perf_now();contact_pending_reports_=0;contact_pending_reason_.fill(nullptr);
   if(!contact_tile_rows_.empty()){contact_tiles_x_=tiles_x;contact_tiles_y_=tiles_y;}
   tile_blend_margin_=terrain.tile_size?8.f/float(terrain.tile_size):0.f;
  }
@@ -2673,6 +2818,7 @@ HRESULT Renderer::update_contact_maps_d3d12(){
   terrain2_marker_logged_=true;
   bridge_append_probe_event("terrain2_no_materials","the map has no material families (atlas profile or preset); terrain 2.0 ground shows the marker colour");
  }
+ report_pending_contact_materials();
  if(!contact_maps_.pending||native_frame_index_<contact_retry_frame_)return S_OK;
  contact_retry_frame_=native_frame_index_+(load_reveal_holding_?1:30);
  for(std::uint32_t material=0;material<contact_blend_max_materials;++material){
@@ -3404,6 +3550,7 @@ HRESULT Renderer::ensure_prepass_targets_d3d12(){
  if(!world_d3d12_||!d3d12_->texture_info(*world_d3d12_,width,height,levels,format))return E_FAIL;
  if(prepass_rest12_&&prepass_normal12_&&shadow_mask12_&&d3d12_->texture_matches(*prepass_rest12_,width,height,DXGI_FORMAT_R16G16B16A16_FLOAT))return S_OK;
  prepass_rest12_.reset();prepass_normal12_.reset();shadow_mask12_.reset();terrain_miss12_.reset();terrain_miss_quads12_.reset();
+ rt_unit_raw12_.reset();rt_unit_blur12_.reset();shadow_result12_.reset();rt_unit_raw_frame12_=UINT64_MAX;shadow_mask_bound12_=nullptr;
  if(prepass_failed_width12_==width&&prepass_failed_height12_==height)return E_FAIL;
  HRESULT hr=d3d12_->create_target(width,height,prepass_rest12_,DXGI_FORMAT_R16G16B16A16_FLOAT,DXGI_FORMAT_UNKNOWN);
  if(SUCCEEDED(hr))hr=d3d12_->create_target(width,height,prepass_normal12_,DXGI_FORMAT_R16G16_UNORM,DXGI_FORMAT_UNKNOWN);
@@ -3458,12 +3605,34 @@ HRESULT Renderer::resolve_world_shadow_mask_d3d12(){
   if(std::strcmp(program.entry,"nativeShadowMaskVS")==0)vertex=&program;
   else if(std::strcmp(program.entry,"nativeShadowMaskPS")==0)pixel=&program;
  }
+ // The Low pixel path (native_low_pixel_path, as the flush's prepass and
+ // material programs): the Low mask program (#320).
+ if(native_low_pixel_path(debug_overlay_.config())){
+  const auto low=native12_.by_defines.find(native_program_key("nativeShadowMaskPS",{"NATIVE_LOW"}));
+  if(low!=native12_.by_defines.end())pixel=low->second;
+ }
  if(!vertex||!pixel||!shadow_mask12_)return E_FAIL;
  // rt_sun_shadows: the mask's sun term traced through this frame's ray
  // tracing scene (the NATIVE_RT_SUN program; update_raytracing_scene_d3d12).
- const bool traced=rt12_.shadow_frame==native_frame_index_&&rt12_.scene&&rt12_.records&&rt12_.programs.size()>kRtSunMask;
- transition_profile_pass(traced?"rt_sun_shadows":"shadow_mask");
+ bool traced=rt12_.shadow_frame==native_frame_index_&&rt12_.scene&&rt12_.records&&rt12_.programs.size()>kRtSunMask;
  D3D12Texture* const mask=shadow_mask12_.get();
+ // The traced program also writes the units' term (a second target, made
+ // with the first traced frame at this size; the result target beside it).
+ if(traced&&(!rt_unit_raw12_||!rt_unit_blur12_||!shadow_result12_)){
+  UINT width=0,height=0,levels=0;DXGI_FORMAT format=DXGI_FORMAT_UNKNOWN;
+  HRESULT made=d3d12_->texture_info(*mask,width,height,levels,format)?S_OK:E_FAIL;
+  if(SUCCEEDED(made))made=d3d12_->create_target(width,height,rt_unit_raw12_,DXGI_FORMAT_R16G16_FLOAT,DXGI_FORMAT_UNKNOWN);
+  if(SUCCEEDED(made))made=d3d12_->create_target(width,height,rt_unit_blur12_,DXGI_FORMAT_R16G16B16A16_FLOAT,DXGI_FORMAT_UNKNOWN);
+  if(SUCCEEDED(made))made=d3d12_->create_target(width,height,shadow_result12_,DXGI_FORMAT_R16G16_FLOAT,DXGI_FORMAT_UNKNOWN);
+  if(FAILED(made)){rt_unit_raw12_.reset();rt_unit_blur12_.reset();shadow_result12_.reset();}
+ }
+ if(traced&&!rt_unit_raw12_){traced=false;d3d12_->omit("rt_sun_shadows (units' shadow targets could not be made: sun maps)",false);}
+ // Their pixels no mask pass of this frame writes read as no term (z, x: 0).
+ if(traced&&rt_unit_raw_frame12_!=native_frame_index_){
+  const float none[4]{0.f,0.f,0.f,0.f};
+  d3d12_->clear_texture(*rt_unit_raw12_,none);d3d12_->clear_texture(*rt_unit_blur12_,none);rt_unit_raw_frame12_=native_frame_index_;
+ }
+ transition_profile_pass(traced?"rt_sun_shadows":"shadow_mask");
  // prepass_depth_check: the mask starts at -1 (no value), which a masked
  // material pixel shows as the magenta failure colour, so a receiver the
  // stencil test skipped is visible; 3 inverts the stencil test (calibration:
@@ -3486,19 +3655,48 @@ HRESULT Renderer::resolve_world_shadow_mask_d3d12(){
  state.depth.BackFace=state.depth.FrontFace;
  HRESULT hr=S_FALSE;
  if(traced){
+  D3D12Texture* const targets[2]={mask,rt_unit_raw12_.get()};
+  d3d12_->set_targets_read_depth(targets,2,world_d3d12_.get());
   d3d12_->set_resource(94,rt12_.scene.get());d3d12_->set_resource(95,rt12_.vertices.get());
   d3d12_->set_resource(99,rt12_.indices.get());d3d12_->set_resource(113,rt12_.records.get());
   // The cut-out cards' alpha (s0; every material batch sets its own).
   D3D11_SAMPLER_DESC card{};card.Filter=D3D11_FILTER_MIN_MAG_MIP_LINEAR;
   card.AddressU=card.AddressV=card.AddressW=D3D11_TEXTURE_ADDRESS_WRAP;card.MaxLOD=D3D11_FLOAT32_MAX;
   d3d12_->set_sampler(0,card);
+  // Fire burn: the burn twin of this program reads the burn mask and labels.
+  d3d12_->set_resource(72,fire_burn_mask12());if(fire_burn_bound_)d3d12_->set_resource(74,fire_burn_materials12());
   hr=d3d12_->draw(*vertex,rt12_.programs[kRtSunMask],state,nullptr,3);
   for(const UINT slot:{94u,95u,99u,113u})d3d12_->set_resource(slot,static_cast<const D3D12Buffer*>(nullptr));
   if(hr==S_OK)d3d12_->count("ray traced sun shadow masks");
   // Its pipeline still compiling: this pass takes the sun maps (named).
   else if(hr==S_FALSE){d3d12_->omit("rt_sun_shadows (pipeline not ready: sun maps this pass)",false);transition_profile_pass("shadow_mask");}
  }
- if(hr==S_FALSE)hr=d3d12_->draw(*vertex,*pixel,state,nullptr,3);
+ const bool unit_term=traced&&hr==S_OK;
+ if(hr==S_FALSE){d3d12_->set_targets_read_depth(&mask,1,world_d3d12_.get());hr=d3d12_->draw(*vertex,*pixel,state,nullptr,3);}
+ // The units' penumbra over the same marks: along x (nativeRtUnitBlurXPS)
+ // then along y (nativeRtUnitFilterPS) into the result the material passes
+ // then read. Units in the scene only: without them the units' term is lit
+ // everywhere and the mask is the result.
+ D3D12Texture* bound=mask;
+ if(hr==S_OK&&unit_term&&rt12_.figures_in_scene){
+  if(rt12_.programs.size()>kRtUnitBlurX){
+   transition_profile_pass("rt_unit_shadows");
+   D3D12Texture* const blur=rt_unit_blur12_.get();
+   d3d12_->set_targets_read_depth(&blur,1,world_d3d12_.get());
+   d3d12_->set_resource(121,rt_unit_raw12_.get());
+   HRESULT filtered=d3d12_->draw(*vertex,rt12_.programs[kRtUnitBlurX],state,nullptr,3);
+   d3d12_->set_resource(121,static_cast<const D3D12Texture*>(nullptr));
+   if(filtered==S_OK){
+    D3D12Texture* const result=shadow_result12_.get();
+    d3d12_->set_targets_read_depth(&result,1,world_d3d12_.get());
+    d3d12_->set_resource(kShadowMaskSlotD3D12,mask);d3d12_->set_resource(121,blur);
+    filtered=d3d12_->draw(*vertex,rt12_.programs[kRtUnitFilter],state,nullptr,3);
+    d3d12_->set_resource(121,static_cast<const D3D12Texture*>(nullptr));d3d12_->set_resource(kShadowMaskSlotD3D12,static_cast<const D3D12Texture*>(nullptr));
+   }
+   if(filtered==S_OK){bound=shadow_result12_.get();d3d12_->count("units' traced sun penumbrae");profiler_.add_draw(2,2);profiler_.add_batch();}
+   else d3d12_->omit(filtered==S_FALSE?"units' traced sun shadows (filter pipeline not ready: none this pass)":"units' traced sun shadows (filter draw failed: none this pass)",false);
+  }else d3d12_->omit("units' traced sun shadows (filter program missing: none)",false);
+ }
  // The receiver inputs leave; the depth returns to the world target's use.
  d3d12_->set_resource(kPrepassRestSlotD3D12,static_cast<const D3D12Texture*>(nullptr));
  d3d12_->set_resource(kPrepassNormalSlotD3D12,static_cast<const D3D12Texture*>(nullptr));
@@ -3514,7 +3712,8 @@ HRESULT Renderer::resolve_world_shadow_mask_d3d12(){
  // stencil (the shader reads the depth plane in the same draw), so the
  // stencil plane is cleared here; nothing else reads the marks.
  d3d12_->clear_stencil_of(*world_d3d12_,0);
- d3d12_->set_resource(kShadowMaskSlotD3D12,mask);
+ shadow_mask_bound12_=bound;
+ d3d12_->set_resource(kShadowMaskSlotD3D12,bound);
  return S_OK;
 }
 
@@ -3573,7 +3772,12 @@ void Renderer::bind_world_targets_d3d12(bool history,bool object_motion,bool gui
 // those surfaces without screen-space AO on D3D12.
 // rt_indirect_resolution: 0 half, 1 a quarter, 2 the full render size (a ray and a reservoir a render pixel).
 // Under Ray Reconstruction 0 is the full size too: Ray Reconstruction assumes independent per-pixel samples (NVIDIA's DLSS-RR guide, 3.5).
-UINT Renderer::rt_indirect_divisor() const noexcept{const int v=configured_integer(debug_overlay_.config(),"rt_indirect_resolution",0);return v>=2||(v==0&&ray_reconstruction_on())?1u:v==1?4u:2u;}
+// rt_indirect_rr_half keeps 0 at half size under Ray Reconstruction: each render pixel takes one half pixel's
+// sample (rtIndirectShadeCS), not a blend of four.
+UINT Renderer::rt_indirect_divisor() const noexcept{
+ const auto& config=debug_overlay_.config();const int v=configured_integer(config,"rt_indirect_resolution",0);
+ return v>=2||(v==0&&ray_reconstruction_on()&&!configured_boolean(config,"rt_indirect_rr_half",false))?1u:v==1?4u:2u;
+}
 int Renderer::ambient_occlusion_quality_d3d12() const noexcept{return rt_ao_enabled_?(rt_indirect_divisor()==4u?1:2):configured_integer(debug_overlay_.config(),"ao_quality",2);}
 HRESULT Renderer::update_ambient_occlusion_d3d12(){
  auto& ao=ao12_;
@@ -3787,6 +3991,8 @@ void Renderer::direct_lights_d3d12() noexcept try{
    const bool cluster_lamp=particle<particle_lights_published_.size();
    if(glow){light.extent[0]=light.extent[1]=cell_half;}
    else light.extent[0]=cluster_lamp?(std::clamp)(particle_lights_published_[particle].spread,lamp_radius,1.5f):lamp_radius;
+   // A buff or sparkle cloud lights from its sphere's sampled point (#263; the lamp loop's sphere term).
+   light.padding=cluster_lamp&&particle_lights_published_[particle].local_glow?1.f:0.f;
    // A shadow-casting lamp's rays aim at its shadow centre (where its cube was baked from).
    const bool cast=!glow&&n<game&&native_point_light_inputs_[n].casts_shadow;
    for(int axis=0;axis<3;++axis)light.target[axis]=cast?source.shadow_center[axis]:light.centre[axis];
@@ -3860,6 +4066,7 @@ void Renderer::direct_lights_d3d12() noexcept try{
   d3d12_->set_resource(40,direct.lights.get());d3d12_->set_resource(41,remapped?direct.remap.get():nullptr);
   d3d12_->set_resource(94,rt.scene.get());d3d12_->set_resource(95,rt.vertices.get());
   d3d12_->set_resource(99,rt.indices.get());d3d12_->set_resource(113,rt.records.get());
+  d3d12_->set_resource(72,configured_boolean(debug_overlay_.config(),"fire_burn_rt_leaves",true)?fire_burn_mask12():nullptr); // lamp shadows see burnt leaves (rdBurnLeafAlpha)
   D3D11_SAMPLER_DESC card{};card.Filter=D3D11_FILTER_MIN_MAG_MIP_LINEAR;
   card.AddressU=card.AddressV=card.AddressW=D3D11_TEXTURE_ADDRESS_WRAP;card.MaxLOD=D3D11_FLOAT32_MAX;
   d3d12_->set_sampler(0,card);
@@ -3959,8 +4166,7 @@ void Renderer::indirect_light_d3d12() noexcept try{
  if(indirect.programs.size()<kRtIndirectPrograms||rt.programs.size()<kRtPrograms)return missing("rt_indirect_light (programs missing)");
  // The reservoirs and surfaces at half or a quarter of the world's size (rt_indirect_resolution), the factor image at its size.
  const bool lit=rt_indirect_lit_;
- // Occlusion alone needs no full-size bounce grid; its consumer runs at half at most.
- const UINT divisor=lit?rt_indirect_divisor():(std::max)(2u,rt_indirect_divisor());
+ const UINT divisor=rt_indirect_divisor();
  const UINT width=width_,height=height_,half_width=(width+divisor-1u)/divisor,half_height=(height+divisor-1u)/divisor;
  if(width==indirect.failed_width&&height==indirect.failed_height)return missing("rt_indirect_light (its images could not be created)");
  const UINT block_row=((half_width+kRtReservoirBlock-1)/kRtReservoirBlock)*kRtReservoirBlock*kRtReservoirBlock;
@@ -4001,8 +4207,8 @@ void Renderer::indirect_light_d3d12() noexcept try{
  // frame's) and the image the ambient occlusion passes read, made on demand;
  // without them the frame keeps the screen-space passes (named once).
  bool occlusion=rt_ao_enabled_&&!indirect.ao_failed;
- // At full-size bounce the selected ray of each 2x2 quad supplies the half-size AO grid.
- // The separate surfaces retain that grid's reprojection contract, without another ray dispatch.
+ // At the full size (divisor 1) the occlusion rays keep their half size: a pass of their own over a
+ // half-size surface image, a render pixel of each 2x2 quad a frame (the ambient occlusion passes run at half at most).
  const bool separate_occlusion=divisor==1u;
  const UINT ao_width=separate_occlusion?(width+1u)/2u:half_width,ao_height=separate_occlusion?(height+1u)/2u:half_height;
  if(occlusion&&!indirect.ao_now){
@@ -4044,7 +4250,8 @@ void Renderer::indirect_light_d3d12() noexcept try{
  std::uint32_t random=std::uint32_t(native_frame_index_)*2654435761u;random^=random>>15;random*=2246822519u;random^=random>>13;
  constants.frame[0]=std::uint32_t(native_frame_index_);
  constants.frame[1]=(reuse?1u:0u)|(object_motion?2u:0u)|(exits?4u:0u)|(configured_boolean(config,"rt_indirect_visibility",true)?8u:0u)|
-  (occlusion_history?16u:0u)|(lit?0u:32u);
+  (occlusion_history?16u:0u)|(lit?0u:32u)|
+  (divisor>1u&&ray_reconstruction_on()&&configured_boolean(config,"rt_indirect_rr_half",false)?64u:0u);
  // The occlusion ray's reach: rt_ao_radius outdoors (how far a roof, a wall
  // or a crown still hides the sky); a cave has no sky and keeps the contact
  // reach of the screen-space passes (ao_radius). A history of 24 frames.
@@ -4064,10 +4271,6 @@ void Renderer::indirect_light_d3d12() noexcept try{
  const auto& quad=divisor==1u?kFull:divisor==4u?kQuad16[native_frame_index_&15u]:kQuad[native_frame_index_&3u];
  constants.offsets[0]=quad[0];constants.offsets[1]=quad[1];
  constants.offsets[2]=reuse?indirect.previous_offset[0]:quad[0];constants.offsets[3]=reuse?indirect.previous_offset[1]:quad[1];
- const auto& occlusion_quad=kQuad[native_frame_index_&3u];
- constants.ao_offsets[0]=occlusion_quad[0];constants.ao_offsets[1]=occlusion_quad[1];
- constants.ao_offsets[2]=reuse?indirect.ao_previous_offset[0]:occlusion_quad[0];
- constants.ao_offsets[3]=reuse?indirect.ao_previous_offset[1]:occlusion_quad[1];
  // The library's defaults for ReSTIR GI (history 8 frames, a sample's age at most 30, 2 spatial samples;
  // the radius in half pixels), four lamp candidates at a hit.
  // rt_indirect_spatial_samples; the radius covers the same share of the screen at either size.
@@ -4154,6 +4357,8 @@ void Renderer::indirect_light_d3d12() noexcept try{
   d3d12_->set_resource(94,rt.scene.get());d3d12_->set_resource(95,rt.vertices.get());
   d3d12_->set_resource(96,rt.terrain_vertices.get());d3d12_->set_resource(97,rt.terrain_indices.get());
   d3d12_->set_resource(99,rt.indices.get());d3d12_->set_resource(113,rt.records.get());
+ {const bool leaves=configured_boolean(debug_overlay_.config(),"fire_burn_rt_leaves",true); // the hit shader's burnt leaves (rtBurnLeafAlpha); off: it returns at once
+  d3d12_->set_resource(72,leaves?fire_burn_mask12():nullptr);d3d12_->set_resource(74,leaves&&fire_burn_bound_?fire_burn_materials12():nullptr);}
   d3d12_->set_resource(114,rt.shade.get());d3d12_->set_resource(115,rt.figures_in_scene?rt.figure_shade.get():nullptr);
   D3D11_SAMPLER_DESC wrap{};wrap.Filter=D3D11_FILTER_MIN_MAG_MIP_LINEAR;
   wrap.AddressU=wrap.AddressV=wrap.AddressW=D3D11_TEXTURE_ADDRESS_WRAP;wrap.MaxLOD=D3D11_FLOAT32_MAX;
@@ -4165,15 +4370,33 @@ void Renderer::indirect_light_d3d12() noexcept try{
  d3d12_->set_resource(4,reuse?before_surfaces:nullptr);
  d3d12_->set_resource(5,object_motion?up.object_motion.get():nullptr);d3d12_->set_resource(6,object_motion?up.object_depth.get():nullptr);
  d3d12_->set_unordered(1,now_surfaces);
- if(occlusion){
+ const bool shared_occlusion=occlusion&&!separate_occlusion;
+ if(shared_occlusion){
   d3d12_->set_resource(9,occlusion_history?indirect.ao_history[1u-indirect.parity].get():nullptr);
   d3d12_->set_unordered(2,indirect.ao_history[indirect.parity].get());d3d12_->set_unordered(3,indirect.ao_now.get());
-  if(separate_occlusion){
-   d3d12_->set_resource(10,occlusion_history?indirect.ao_surfaces[1u-indirect.parity].get():nullptr);
-   d3d12_->set_unordered(4,indirect.ao_surfaces[indirect.parity].get());
-  }
  }
- HRESULT hr=d3d12_->dispatch(indirect.programs[occlusion?kRtIndirectSampleAo:kRtIndirectSample],(half_width+7u)/8u,(half_height+7u)/8u,1);
+ HRESULT hr=lit||shared_occlusion?d3d12_->dispatch(indirect.programs[shared_occlusion?kRtIndirectSampleAo:kRtIndirectSample],(half_width+7u)/8u,(half_height+7u)/8u,1):S_OK;
+ // The occlusion rays' own pass at the full size: the sampling pass for occlusion alone (riFrame.y bit 32) at half
+ // the render size, over its own surfaces and quad offsets.
+ static constexpr std::uint32_t kOcclusionQuad[4][2]{{0,0},{1,1},{1,0},{0,1}};
+ const auto& occlusion_quad=kOcclusionQuad[native_frame_index_&3u];
+ if(hr==S_OK&&occlusion&&separate_occlusion){
+  transition_profile_pass("rt_indirect_occlusion");
+  RtIndirectConstants occlusion_constants=constants;
+  occlusion_constants.frame[1]|=32u;
+  occlusion_constants.reuse[1]=2.f;
+  occlusion_constants.reservoir[3]=ao_width|(ao_height<<16);
+  occlusion_constants.offsets[0]=occlusion_quad[0];occlusion_constants.offsets[1]=occlusion_quad[1];
+  occlusion_constants.offsets[2]=reuse?indirect.ao_previous_offset[0]:occlusion_quad[0];occlusion_constants.offsets[3]=reuse?indirect.ao_previous_offset[1]:occlusion_quad[1];
+  bind_common();
+  d3d12_->set_constants(1,&occlusion_constants,sizeof(occlusion_constants));
+  d3d12_->set_resource(4,reuse?indirect.ao_surfaces[1u-indirect.parity].get():nullptr);
+  d3d12_->set_resource(5,object_motion?up.object_motion.get():nullptr);d3d12_->set_resource(6,object_motion?up.object_depth.get():nullptr);
+  d3d12_->set_unordered(1,indirect.ao_surfaces[indirect.parity].get());
+  d3d12_->set_resource(9,occlusion_history?indirect.ao_history[1u-indirect.parity].get():nullptr);
+  d3d12_->set_unordered(2,indirect.ao_history[indirect.parity].get());d3d12_->set_unordered(3,indirect.ao_now.get());
+  hr=d3d12_->dispatch(indirect.programs[kRtIndirectSampleAo],(ao_width+7u)/8u,(ao_height+7u)/8u,1);
+ }
  // The sampling pass ran: its occlusion image is this frame's whatever the later passes do.
  const bool occlusion_written=occlusion&&hr==S_OK;
  if(occlusion_written)indirect.ao_frame=native_frame_index_;
@@ -4237,7 +4460,7 @@ void Renderer::indirect_light_d3d12() noexcept try{
     d3d12_->set_resource(10,into_factor?indirect.denoise_work.get():indirect.factor.get());
     d3d12_->set_resource(14,indirect.denoise_packed[now].get());
     d3d12_->set_unordered(1,into_factor?indirect.factor.get():indirect.denoise_work.get());
-    hr=d3d12_->dispatch(indirect.programs[kRtIndirectAtrous+pass],(width+15u)/16u,(height+7u)/8u,1);
+    hr=d3d12_->dispatch(indirect.programs[kRtIndirectAtrous],(width+7u)/8u,(height+7u)/8u,1);
    }
    if(hr==S_OK){denoised=true;std::memcpy(indirect.previous_ray.data(),step.ray,sizeof(step.ray));}
   }
@@ -4506,6 +4729,8 @@ void Renderer::reflections_d3d12() noexcept try{
  d3d12_->set_resource(94,rt.scene.get());d3d12_->set_resource(95,rt.vertices.get());
  d3d12_->set_resource(96,rt.terrain_vertices.get());d3d12_->set_resource(97,rt.terrain_indices.get());
  d3d12_->set_resource(99,rt.indices.get());d3d12_->set_resource(113,rt.records.get());
+ {const bool leaves=configured_boolean(debug_overlay_.config(),"fire_burn_rt_leaves",true); // the hit shader's burnt leaves (rtBurnLeafAlpha); off: it returns at once
+  d3d12_->set_resource(72,leaves?fire_burn_mask12():nullptr);d3d12_->set_resource(74,leaves&&fire_burn_bound_?fire_burn_materials12():nullptr);}
  d3d12_->set_resource(114,rt.shade.get());d3d12_->set_resource(115,rt.figures_in_scene?rt.figure_shade.get():nullptr);
  {D3D11_SAMPLER_DESC wrap{};wrap.Filter=D3D11_FILTER_MIN_MAG_MIP_LINEAR;
   wrap.AddressU=wrap.AddressV=wrap.AddressW=D3D11_TEXTURE_ADDRESS_WRAP;wrap.MaxLOD=D3D11_FLOAT32_MAX;
@@ -4611,6 +4836,8 @@ bool Renderer::water_reflection_rays_d3d12(const ShaderProgram& full_screen_vs,c
  d3d12_->set_resource(94,rt.scene.get());d3d12_->set_resource(95,rt.vertices.get());
  d3d12_->set_resource(96,rt.terrain_vertices.get());d3d12_->set_resource(97,rt.terrain_indices.get());
  d3d12_->set_resource(99,rt.indices.get());d3d12_->set_resource(113,rt.records.get());
+ {const bool leaves=configured_boolean(debug_overlay_.config(),"fire_burn_rt_leaves",true); // the hit shader's burnt leaves (rtBurnLeafAlpha); off: it returns at once
+  d3d12_->set_resource(72,leaves?fire_burn_mask12():nullptr);d3d12_->set_resource(74,leaves&&fire_burn_bound_?fire_burn_materials12():nullptr);}
  d3d12_->set_resource(114,rt.shade.get());d3d12_->set_resource(115,rt.figures_in_scene?rt.figure_shade.get():nullptr);
  {D3D11_SAMPLER_DESC wrap{};wrap.Filter=D3D11_FILTER_MIN_MAG_MIP_LINEAR;
   wrap.AddressU=wrap.AddressV=wrap.AddressW=D3D11_TEXTURE_ADDRESS_WRAP;wrap.MaxLOD=D3D11_FLOAT32_MAX;
@@ -4634,6 +4861,7 @@ void Renderer::release_raytracing_d3d12() noexcept{
  auto& rt=rt12_;
  rt.scene.reset();rt.terrain.reset();rt.map=UINT64_MAX;
  rt.figure_bottom.reset();rt.figures_next.clear();rt.figures_in_scene=false;
+ rt.figure_topology.clear();rt.top_instances=0;
  rt.chunks.clear();rt.members.clear();
  rt.vertices.reset();rt.indices.reset();rt.records.reset();
  rt.shade.reset();rt.figure_shade.reset();rt.figure_textures.clear();rt.terrain_vertices.reset();rt.terrain_indices.reset();
@@ -4674,6 +4902,7 @@ HRESULT Renderer::update_raytracing_statics_d3d12(){
  source=mix(mix(source,active?active_casters->revision:0u),active?active_statics_.caster_revision:0u);
  source=mix(source,neighbours.built?1u:0u);source=mix(source,neighbours.built_key);
  source=mix(source,neighbours.built_content_revision);source=mix(source,neighbours.records.size());
+ source=mix(source,fire_rt_gone_revision_); // settled burnt trees' leaves leave the scene
  // The neighbour maps' terrain records (world records of terrain meshes with
  // ground, flagged neighbour), found again when the record table changed.
  const auto neighbour_terrain_record=[&](const NativeInstanceRecord& record){
@@ -4789,7 +5018,14 @@ HRESULT Renderer::update_raytracing_statics_d3d12(){
  std::vector<UINT> sources;
  if(active)for(const auto id:active_casters->ids){
   const auto found=active_statics_.casters.find(id);
-  if(found!=active_statics_.casters.end())sources.insert(sources.end(),found->second.records.begin(),found->second.records.end());
+  if(found==active_statics_.casters.end())continue;
+  // A tree whose burn has settled (fire_rt_gone_ids_) keeps its trunk and
+  // branches in the scene; its leaf records (native_foliage_part_flag) go.
+  const bool gone=std::binary_search(fire_rt_gone_ids_.begin(),fire_rt_gone_ids_.end(),id);
+  for(const UINT record:found->second.records){
+   if(gone&&record<native_instance_records_.size()&&(native_instance_records_[record].command.instance.flags&native_foliage_part_flag))continue;
+   sources.push_back(record);
+  }
  }
  for(const auto& selected:neighbours.records)sources.push_back(selected.record);
  for(const UINT caster:sources){
@@ -4808,7 +5044,7 @@ HRESULT Renderer::update_raytracing_statics_d3d12(){
   instance.mesh=record_key(draw,state,true);
   std::memcpy(instance.transform,&draw.instance.object_to_world,sizeof(instance.transform));
   raytracing_record_cutout(draw,state,instance.cutout,instance.alpha_reference);
-  if(instance.cutout)instance.texture=draw.instance.padding[0];
+  if(instance.cutout)instance.texture=draw.instance.padding[0]|((draw.instance.flags&native_foliage_part_flag)?0x80000000u:0u);
   instance.kept=draw.texture12;raytracing_shade_words(draw,false,instance.shade);
   instances.push_back(std::move(instance));
   wanted.push_back({instances.back().mesh,caster,draw.geometry_page,false,true});
@@ -5033,7 +5269,10 @@ HRESULT Renderer::update_raytracing_statics_d3d12(){
    geometry.opaque=!cutout;
    geometries.push_back(geometry);
    chunk.keys.push_back(pending[n].key);
-   chunk.table.insert(chunk.table.end(),{jobs[n].vertex_base,jobs[n].triangle_base,cutout?draw.instance.padding[0]:0u,cutout?reference_bits:0u});
+   // Bit 31 of the texture word: a leaf part (native_foliage_part_flag) - the
+   // traced rays' burnt-leaf test takes its crown burn without label reads.
+   const std::uint32_t leaf=(draw.instance.flags&native_foliage_part_flag)?0x80000000u:0u;
+   chunk.table.insert(chunk.table.end(),{jobs[n].vertex_base,jobs[n].triangle_base,cutout?draw.instance.padding[0]|leaf:0u,cutout?reference_bits:0u});
    if(draw.texture12)chunk.textures.push_back(draw.texture12);
    {std::uint32_t shade[kRtShadeWords];raytracing_shade_words(draw,cut.terrain,shade);chunk.shade.insert(chunk.shade.end(),shade,shade+kRtShadeWords);}
    chunk.vertices+=jobs[n].component_count;chunk.triangles+=jobs[n].triangle_count;
@@ -5074,7 +5313,7 @@ void Renderer::update_raytracing_scene_d3d12() noexcept try{
  rt.frame=native_frame_index_;
  const auto terrain=ambient_terrain_.lock();
  if(!terrain){release_raytracing_d3d12();return;}
- if(rt.programs.empty())append_raytracing_shader_programs(rt.programs);
+ if(rt.programs.empty()){append_raytracing_shader_programs(rt.programs);++world_programs_generation_;}
  if(rt.programs.size()<kRtPrograms)return;
  if(rt.map!=ambient_map_generation_){
   // One attempt a map (the terrain asset is immutable; liquids and their
@@ -5124,7 +5363,11 @@ void Renderer::update_raytracing_scene_d3d12() noexcept try{
   const float card_mip_distance=20.f;
   // The frame (the shader takes its low 10 bits); bit 16: rt_debug_view 4.
   header[4]=(std::uint32_t(native_frame_index_)&1023u)|(configured_integer(config,"rt_debug_view",0)==4?0x10000u:0u);
-  header[5]=std::uint32_t((std::clamp)(configured_integer(config,"rt_sun_rays",1),1,8));
+  // Low byte: rays a pixel of the static scene (with history); high half:
+  // the tangent of the units' penumbra cone in 1/65536 (rt_unit_shadow_softness;
+  // the mask pass sizes their penumbra by it, nativeRtUnitFilterPS draws it).
+  {const float unit=std::tan((std::clamp)(configured_floating_point(config,"rt_unit_shadow_softness",1.f),0.f,5.f)*3.14159265f/180.f);
+   header[5]=std::uint32_t((std::clamp)(configured_integer(config,"rt_sun_rays",1),1,8))|(std::uint32_t(std::lround(unit*65536.f))<<16);}
   std::memcpy(&header[6],&card_mip_distance,sizeof(float));
   header[7]=std::uint32_t(records);}
  // The units of the frame before, from their posed world vertices: every
@@ -5132,6 +5375,7 @@ void Renderer::update_raytracing_scene_d3d12() noexcept try{
  // re-ranged record is left out; its mesh is alive while its record is).
  std::vector<D3D12RaytracingGeometry> figure_geometries;
  std::vector<std::uint32_t> figure_shade;std::vector<D3D12TextureRef> figure_textures;
+ std::vector<std::uint32_t> figure_topology;bool topology_known=true;
  {auto drawn=std::move(rt.figures_next);rt.figures_next.clear();
   std::sort(drawn.begin(),drawn.end(),[](const auto& a,const auto& b){return a.record<b.record;});
   drawn.erase(std::unique(drawn.begin(),drawn.end(),[](const auto& a,const auto& b){return a.record==b.record;}),drawn.end());
@@ -5149,16 +5393,53 @@ void Renderer::update_raytracing_scene_d3d12() noexcept try{
    geometry.index_buffer=native_geometry_pages_[draw.geometry_page].d3d12.get();
    geometry.index_offset=draw.mesh->index_offset;geometry.index_count=draw.index_count-draw.index_count%3u;
    figure_geometries.push_back(geometry);
+   // Its topology: a mesh without a known geometry revision never refits.
+   const auto& revision=draw.mesh->geometry_revision;
+   figure_topology.insert(figure_topology.end(),{draw.geometry_page,draw.mesh->index_offset,geometry.index_count,geometry.vertex_count,
+    revision[0],revision[1],revision[2],revision[3],revision[4],draw.mesh->geometry_revision_valid?1u:0u});
+   if(!draw.mesh->geometry_revision_valid)topology_known=false;
    std::uint32_t shade[kRtShadeWords];raytracing_shade_words(draw,false,shade);
    figure_shade.insert(figure_shade.end(),shade,shade+kRtShadeWords);
    if(draw.texture12)figure_textures.push_back(draw.texture12);
   }}
  bool figures=false;
+ // rt_figure_refit: the units' structure is refitted from the new pose while
+ // its topology stays (DXR's update; NVIDIA's ray tracing guidance for
+ // deforming meshes) and built again when it changes, and at least every
+ // rt_figure_rebuild_frames frames (a refitted tree loosens as units move).
+ // The scene's top level follows: refitted when its instances are the same
+ // and the units' structure kept its place, else built again.
+ const bool refit_wanted=configured_boolean(config,"rt_figure_refit",true);
+ const std::uint32_t rebuild_frames=std::uint32_t((std::clamp)(configured_integer(config,"rt_figure_rebuild_frames",30),1,600));
+ bool figure_moved=false; // the units' structure is a new allocation: the top level's descriptions name it no more
  if(!figure_geometries.empty()){
   transition_profile_pass("rt_figures");
-  figures=SUCCEEDED(d3d12_->build_raytracing_bottom(*native12_.world_vertices,UINT(sizeof(NativeWorldVertexGpu)),*native12_.world_vertices,
-   figure_geometries.data(),UINT(figure_geometries.size()),rt.figure_bottom,true));
+  const D3D12Buffer* before=rt.figure_bottom.get();
+  const bool refit=refit_wanted&&topology_known&&rt.figure_bottom&&rt.figure_refits_since_build+1u<rebuild_frames&&figure_topology==rt.figure_topology;
+  HRESULT built=E_FAIL;
+  if(refit){
+   built=d3d12_->build_raytracing_bottom(*native12_.world_vertices,UINT(sizeof(NativeWorldVertexGpu)),*native12_.world_vertices,
+    figure_geometries.data(),UINT(figure_geometries.size()),rt.figure_bottom,true,kD3D12BottomRefit);
+   if(SUCCEEDED(built)){++rt.figure_refits;++rt.figure_refits_since_build;}
+  }
+  if(FAILED(built)){
+   built=d3d12_->build_raytracing_bottom(*native12_.world_vertices,UINT(sizeof(NativeWorldVertexGpu)),*native12_.world_vertices,
+    figure_geometries.data(),UINT(figure_geometries.size()),rt.figure_bottom,true,refit_wanted?kD3D12BottomUpdatable:0u);
+   if(SUCCEEDED(built)){++rt.figure_builds;rt.figure_refits_since_build=0;rt.figure_topology=std::move(figure_topology);}
+   else rt.figure_topology.clear();
+  }
+  figures=SUCCEEDED(built);
+  figure_moved=rt.figure_bottom.get()!=before;
   if(!figures&&!rt.omitted_logged){rt.omitted_logged=true;bridge_append_probe_event("rt_omitted","units: their structure could not be built (see host.log); they cast no traced shadow");}
+  // The counters, once every 600 frames with units in the scene (rt_figure_refit's proof).
+  if(native_frame_index_>=rt.figure_report_frame+600){
+   rt.figure_report_frame=native_frame_index_;
+   char text[200];
+   std::snprintf(text,sizeof(text),"refit=%d builds=%llu refits=%llu geometries=%zu top_builds=%llu top_refits=%llu top_instances=%u rebuild_frames=%u",
+    refit_wanted?1:0,static_cast<unsigned long long>(rt.figure_builds),static_cast<unsigned long long>(rt.figure_refits),figure_geometries.size(),
+    static_cast<unsigned long long>(rt.top_builds),static_cast<unsigned long long>(rt.top_refits),rt.top_instances,rebuild_frames);
+   bridge_append_probe_event("rt_figures",text);
+  }
   // Their shading words by geometry, new each frame (without the buffer a unit hit reads zeros: white, no profile).
   const UINT64 shade_bytes=UINT64(figure_shade.size())*sizeof(std::uint32_t);
   if(figures&&(!rt.figure_shade||d3d12_->buffer_bytes(*rt.figure_shade)<shade_bytes)){
@@ -5169,7 +5450,18 @@ void Renderer::update_raytracing_scene_d3d12() noexcept try{
   else rt.figure_shade.reset();
  }
  const bool table_changed=rt.scene_dirty||!rt.records;
- if(table_changed||figures||rt.figures_in_scene){
+ // The same instances, the units' structure in its place: the top level is refitted to their new bounds
+ // (no instance list, no upload); every rt_figure_rebuild_frames frames it is built again.
+ bool top_refitted=false;
+ if(!table_changed&&figures&&rt.figures_in_scene&&!figure_moved&&rt.scene&&refit_wanted&&rt.top_instances&&
+    rt.top_refits_since_build+1u<rebuild_frames&&SUCCEEDED(d3d12_->write_buffer(*rt.records,0,header,sizeof(header)))){
+  transition_profile_pass("rt_scene_top");
+  if(SUCCEEDED(d3d12_->build_raytracing_top(nullptr,rt.top_instances,rt.scene,true,kD3D12BottomRefit))){
+   top_refitted=true;++rt.top_refits_since_build;++rt.top_refits;
+  }
+ }
+ if(top_refitted){} // its header is written above
+ else if(table_changed||figures||rt.figures_in_scene){
   rt.scene_dirty=false;
   std::vector<D3D12RaytracingInstance> instances;
   std::vector<std::uint32_t> table(header,header+kRtHeaderWords),shade_table;
@@ -5210,15 +5502,17 @@ void Renderer::update_raytracing_scene_d3d12() noexcept try{
    if(SUCCEEDED(hr))hr=d3d12_->write_buffer_bulk(*rt.shade,0,shade_table.data(),shade_bytes);
   }else hr=d3d12_->write_buffer(*rt.records,0,header,sizeof(header));
   if(SUCCEEDED(hr)){
-   if(instances.empty())rt.scene.reset();
+   if(instances.empty()){rt.scene.reset();rt.top_instances=0;}
    else{
-    // Built again in place every frame while units are in it.
-    transition_profile_pass(table_changed?"rt_scene":"rt_figures");
-    hr=d3d12_->build_raytracing_top(instances.data(),UINT(instances.size()),rt.scene,true);
+    // Built again in place when units join or leave it or their structure moved, refitted between (above).
+    transition_profile_pass(table_changed?"rt_scene":"rt_scene_top");
+    hr=d3d12_->build_raytracing_top(instances.data(),UINT(instances.size()),rt.scene,true,refit_wanted?kD3D12BottomUpdatable:0u);
+    if(SUCCEEDED(hr)){rt.top_instances=UINT(instances.size());rt.top_refits_since_build=0;++rt.top_builds;}
+    else rt.top_instances=0;
    }
   }
   if(FAILED(hr)){
-   rt.scene.reset();rt.records.reset();rt.shade.reset();rt.figures_in_scene=false;
+   rt.scene.reset();rt.records.reset();rt.shade.reset();rt.figures_in_scene=false;rt.top_instances=0;
    if(!rt.omitted_logged){rt.omitted_logged=true;bridge_append_probe_event("rt_omitted","the scene's top level or record table could not be made (see host.log); nothing traces");}
    return;
   }
@@ -5247,7 +5541,7 @@ void Renderer::rt_term_view_d3d12(bool after_upscaler) noexcept{
  d3d12_->set_constants(1,control,sizeof(control));
  d3d12_->set_depth_resource(0,world_d3d12_.get());
  d3d12_->set_resource(1,up.guide_normal.get());d3d12_->set_resource(2,up.guide_diffuse.get());d3d12_->set_resource(3,up.guide_specular.get());
- d3d12_->set_resource(4,shadow_mask12_.get());
+ d3d12_->set_resource(4,shadow_mask_bound12_?shadow_mask_bound12_:shadow_mask12_.get());
  d3d12_->set_resource(5,rt_indirect12_.factor_frame==native_frame_index_?rt_indirect12_.factor.get():nullptr);
  d3d12_->set_resource(6,ao12_.frame==native_frame_index_?ao12_.filtered.get():nullptr);
  d3d12_->set_resource(7,object_motion?up.object_motion.get():nullptr);d3d12_->set_resource(8,object_motion?up.object_depth.get():nullptr);
@@ -5286,11 +5580,13 @@ void Renderer::raytracing_debug_view_d3d12() noexcept{
  d3d12_->set_constants(1,&constants,sizeof(constants));
  d3d12_->set_depth_resource(0,world_d3d12_.get());
  d3d12_->set_resource(1,rt.scene.get());
- d3d12_->set_resource(2,mode==3?shadow_mask12_.get():nullptr);
+ d3d12_->set_resource(2,mode==3?(shadow_mask_bound12_?shadow_mask_bound12_:shadow_mask12_.get()):nullptr);
  if(hits){
   d3d12_->set_resource(94,rt.scene.get());d3d12_->set_resource(95,rt.vertices.get());
   d3d12_->set_resource(96,rt.terrain_vertices.get());d3d12_->set_resource(97,rt.terrain_indices.get());
   d3d12_->set_resource(99,rt.indices.get());d3d12_->set_resource(113,rt.records.get());
+ {const bool leaves=configured_boolean(debug_overlay_.config(),"fire_burn_rt_leaves",true); // the hit shader's burnt leaves (rtBurnLeafAlpha); off: it returns at once
+  d3d12_->set_resource(72,leaves?fire_burn_mask12():nullptr);d3d12_->set_resource(74,leaves&&fire_burn_bound_?fire_burn_materials12():nullptr);}
   d3d12_->set_resource(114,rt.shade.get());d3d12_->set_resource(115,rt.figures_in_scene?rt.figure_shade.get():nullptr);
   d3d12_->set_resource(kTerrain2CacheCoarseSlotD3D12,terrain2_cache_on_?terrain2_cache_coarse12_.get():nullptr);
   d3d12_->set_resource(kTerrain2CacheParamsSlotD3D12,terrain2_cache_on_?terrain2_cache_params12_.get():nullptr);
@@ -5330,6 +5626,33 @@ D3D12NativeState Renderer::world_effect_state_d3d12(bool depth_test) const noexc
  if(depth_test){state.depth.DepthEnable=TRUE;state.depth.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ZERO;state.depth.DepthFunc=D3D11_COMPARISON_LESS_EQUAL;}
  return state;
 }
+// The weather and map effects draw only on some maps or in some weather
+// (dune wisps: Suslanger crests in wind), so a recorded pipeline list may
+// lack them and their first draw built its pipeline in play (52 ms on the
+// 3070 laptop, #344). Once per world, from its first world frame (under the
+// load hold), their program pairs are requested with the targets they draw
+// into; the workers build them and the list records them.
+void Renderer::warm_world_effects_d3d12() noexcept try{
+ if(!d3d12_||!world_d3d12_||world_effects_warm_epoch_==world_state_epoch_)return;
+ world_effects_warm_epoch_=world_state_epoch_;
+ const auto& config=debug_overlay_.config();
+ const auto request=[&](std::vector<ShaderProgram>& programs,void(*append)(std::vector<ShaderProgram>&),
+                        std::initializer_list<std::pair<std::size_t,std::size_t>> pairs,bool depth_test){
+  if(programs.empty())append(programs);
+  bind_world_effect_d3d12(depth_test);
+  const D3D12NativeState state=world_effect_state_d3d12(depth_test);
+  for(const auto& [vs,ps]:pairs)if(vs<programs.size()&&ps<programs.size())d3d12_->request_instanced(programs[vs],programs[ps],state);
+ };
+ if(configured_integer(config,"ambient_particles",1)>0){
+  request(ambient12_.ambient,append_ambient_particle_shader_programs,{{0,1}},false);
+  request(ambient12_.ambient,append_ambient_particle_shader_programs,{{2,3}},true);
+ }
+ if(configured_integer(config,"wind_trails",1)>0)request(ambient12_.wind,append_wind_trail_shader_programs,{{0,1}},false);
+ if(configured_integer(config,"dune_wisps",1)>0)request(ambient12_.wisps,append_dune_wisp_shader_programs,{{0,1}},false);
+ if(configured_integer(config,"precipitation",3)>0)
+  request(ambient12_.precipitation,append_precipitation_shader_programs,{{2,3},{0,1},{0,9},{4,5}},false);
+ d3d12_->clear_slots();bind_world_targets_d3d12();
+}catch(...){}
 void Renderer::bind_world_effect_d3d12(bool depth_test){
  D3D12Texture* world=world_d3d12_.get();
  d3d12_->clear_slots();
@@ -5413,8 +5736,11 @@ HRESULT Renderer::composite_world_d3d12(){
   // The world effects composite_world draws before the history copy, in its
   // order; each binds what it reads and returns the world target bound.
   capture_opaque_world_d3d12(); // unless a game effect already took it this frame
+  warm_world_effects_d3d12(); // once per world (#344)
   render_ambient_particles();
+  draw_fire_flames(); // fire_burn: the game's fire on burning trees and bushes
   render_wind_trails();
+  render_dune_wisps();
   render_precipitation();
   // Diagnostic, over the finished world image (rt_debug_view; off: one option read).
   raytracing_debug_view_d3d12();
@@ -5442,6 +5768,7 @@ HRESULT Renderer::composite_world_d3d12(){
   transition_profile_pass("ui_composition");return FAILED(world)?world:dimmed;
  }
  world_d3d12_bound_=false;
+ if(!hit_test_active_)world_camera_last_=bridge_scene_world_to_clip_snapshot().valid;
  const auto& config=debug_overlay_.config();
  // The world image to the output: SMAA 1x or the plain copy (SceneComposite::render);
  // with a temporal upscaler the plain copy into the render-size resolved
@@ -5478,7 +5805,9 @@ HRESULT Renderer::composite_world_d3d12(){
  const HRESULT upscaled=!scene_output_d3d12()?S_OK:temporal_upscaler()?upscale_world_d3d12():filtered_upscale_d3d12();
  d3d12_->clear_slots();d3d12_->set_target(nullptr);
  world_output_this_present_=true;
+ composite_interact_overlay_d3d12(); // Alt interact overlay (#315): part of the world image
  capture_hudless_d3d12();
+ take_harness_world_shot(); // harness_hide_hud: the world before any interface
  draw_pending_rectangles();
  const HRESULT dimmed=dim_hud_layout_d3d12();
  transition_profile_pass("ui_composition");
@@ -5908,6 +6237,67 @@ bool Renderer::deferred_world_wanted_d3d12() const noexcept{
 // shipping programs. The general programs (shader_split 0, material quality
 // Off), the check programs (F10 shader_split_check, fur_debug) and the
 // prepass depth check's second draw read visible triangles.
+// Where an indexed batch's triples start in the index list: the list holds
+// only the indexed slots, numbered from the layout's indexed_first (#289).
+// Every draw from the list binds it here (colour, prepass, Alt overlay).
+UINT64 Renderer::native_index_list_byte(const NativeSubmissionLayout& layout,const NativeBatch& batch) noexcept{
+ return UINT64(batch.output_triangle_base-layout.indexed_first)*12u;
+}
+// The unwritten-vertex check (#331; native_shader.h nativeCheckWorldCorners):
+// the build counts, per world range, drawn corners that read a world vertex no
+// preparation wrote (the stretched pickups: a corner at the world origin).
+// Every 120 frames the states are read back; a range whose count grew is named
+// once per growth (its slot's object id, part and model, the range and its
+// generations, the records drawing it), at most 256 lines a session.
+void Renderer::report_world_vertex_faults_d3d12() noexcept try{
+ if(world_fault_ticket_){
+  std::vector<std::uint8_t> states;
+  const HRESULT polled=d3d12_->poll_readback(world_fault_ticket_,states);
+  if(polled==S_FALSE)return;
+  world_fault_ticket_=0;
+  const std::size_t count=polled==S_OK?(std::min)(states.size()/sizeof(NativeWorldStateGpu),native_world_ranges_.size()):0;
+  if(world_fault_seen_.size()<count)world_fault_seen_.resize(count,0);
+  for(std::size_t index=0;index<count;++index){
+   NativeWorldStateGpu state;std::memcpy(&state,states.data()+index*sizeof(state),sizeof(state));
+   UINT& seen=world_fault_seen_[index];
+   if(state.fault_corners<seen)seen=0; // a new world's states
+   if(state.fault_corners==seen)continue;
+   const UINT added=state.fault_corners-seen;seen=state.fault_corners;
+   if(world_fault_lines_>=256)continue;
+   ++world_fault_lines_;
+   const auto& range=native_world_ranges_[index];
+   // Its slot (the prepared mesh that owns the range) and that slot's model.
+   const NativePreparedMeshSlot* owner=nullptr;
+   for(const auto& slot:native_prepared_mesh_slots_)if(slot.world_allocation==index){owner=&slot;break;}
+   std::string model="-";
+   if(owner&&owner->mesh)for(const auto& [key,mesh]:native_meshes_)if(&mesh==owner->mesh){
+    // The resource identity's name, after the key's third colon.
+    std::size_t at=std::string::npos;
+    for(int field=0;field<3;++field){at=key.resource_key.find(':',at==std::string::npos?0:at+1);if(at==std::string::npos)break;}
+    model=key.resource_key.substr(at==std::string::npos?0:at+1,96);break;}
+   // The records whose command draws this range, and the generation each holds.
+   UINT records=0,stale=0;
+   for(const auto& record:native_instance_records_)if(record.occupied&&record.command.world_allocation==index){
+    ++records;if(record.descriptor.world_generation_low!=static_cast<UINT>(range.generation))++stale;}
+   char line[512];
+   std::snprintf(line,sizeof(line),
+    "range=%zu base=%u count=%u corners=+%u component=%u owned=%d references=%u generation=%llu state_generation=%llu "
+    "slot=%s id=%d part=%u model=%s slot_world_base=%u slot_world_count=%u resolved=%llu frames_ago records=%u stale_generation=%u",
+    index,range.base,range.count,added,state.fault_component,range.owned?1:0,range.references,
+    static_cast<unsigned long long>(range.generation),
+    static_cast<unsigned long long>(state.geometry[0]|(std::uint64_t(state.geometry[1])<<32)),
+    owner?(owner->active?"active":"inactive"):"none",owner?static_cast<int>(owner->identity.signed_id):0,
+    owner?owner->identity.part_index:UINT_MAX,model.c_str(),owner?owner->world_base:UINT_MAX,owner?owner->world_count:0u,
+    static_cast<unsigned long long>(owner?native_frame_index_-owner->world_resolve_frame:0),records,stale);
+   bridge_report_event("owned_world_vertex_unwritten",line);
+  }
+ }
+ if(!native12_.world_states||native_frame_index_<world_fault_frame_+120)return;
+ world_fault_frame_=native_frame_index_;
+ const UINT64 bytes=(std::min)(d3d12_->buffer_bytes(*native12_.world_states),
+  UINT64(native_world_ranges_.size())*sizeof(NativeWorldStateGpu));
+ if(bytes&&FAILED(d3d12_->request_readback(*native12_.world_states,bytes,world_fault_ticket_,"world vertex fault check")))world_fault_ticket_=0;
+}catch(...){world_fault_ticket_=0;}
 bool Renderer::indexed_object_draws_d3d12() const noexcept{
  const auto& config=debug_overlay_.config();
  return d3d12_&&configured_boolean(config,"indexed_object_draws",true)&&material_level()&&
@@ -5916,8 +6306,9 @@ bool Renderer::indexed_object_draws_d3d12() const noexcept{
 }
 
 void Renderer::swap_native_slot_buffers12(unsigned layout_slot) noexcept{
- if(layout_slot<2||layout_slot>4)return;
- auto& own=native_slot_buffers12_[layout_slot-2];
+ const unsigned index=native_slot_buffer_index12(layout_slot);
+ if(index==UINT_MAX)return;
+ auto& own=native_slot_buffers12_[index];
  std::swap(own.dynamic,native12_.dynamic);std::swap(own.arguments,native12_.arguments);
  std::swap(own.visible,native12_.visible);std::swap(own.prepared,native12_.prepared);
  std::swap(own.owners,native12_.owners);std::swap(own.indices,native12_.indices);
@@ -5960,7 +6351,7 @@ HRESULT Renderer::flush_native_d3d12(unsigned layout_slot){
  // other flush draws the kept materials first, so the frame's order holds.
  const int phase=native_flush_phase_;native_flush_phase_=0;
  native_flush_deferred_=false;
- const bool slot_set=layout_slot>=2&&layout_slot<=4;
+ const bool slot_set=native_slot_buffer_index12(layout_slot)!=UINT_MAX; // the static sets (2-4, neighbour chunks)
  const bool may_defer=phase==1&&slot_set&&(static_reuse||static_bake)&&
   std::none_of(deferred_world12_.begin(),deferred_world12_.end(),[&](const DeferredWorldFlush12& entry){return entry.slot==layout_slot;})&&!scene_composited_&&!hit_test_active_&&world_d3d12_bound_&&
   depth_prepass_d3d12()&&
@@ -5980,23 +6371,11 @@ HRESULT Renderer::flush_native_d3d12(unsigned layout_slot){
  // The ray tracing scene of this world frame (rt_sun_shadows, rt_debug_view;
  // off: two option reads), before this flush binds anything.
  if(world_d3d12_bound_&&!scene_composited_&&!hit_test_active_)update_raytracing_scene_d3d12();
+ report_world_vertex_faults_d3d12(); // #331: the build's unwritten-vertex counts, read back and named
  // Material classes (S1): profiles of newly composed atlases, then every
  // record's profile index once the set changed; profiles of retired textures go.
  {
-  // Temporary (equipment lag, 2026-11-06): material profile builds over 10 ms.
-  LARGE_INTEGER material_start{},material_end{},material_frequency{};
-  QueryPerformanceCounter(&material_start);
-  const auto built_before=material_profiles_built_;
   prepare_material_profiles();refresh_material_profile_indices_d3d12();refresh_native_material_instances();trim_material_profiles();
-  QueryPerformanceCounter(&material_end);QueryPerformanceFrequency(&material_frequency);
-  const double material_ms=1000.0*double(material_end.QuadPart-material_start.QuadPart)/double(material_frequency.QuadPart);
-  static unsigned material_slow_lines=0;
-  if(material_ms>10.0&&material_slow_lines<200){
-   ++material_slow_lines;
-   char line[160];std::snprintf(line,sizeof(line),"material profiles took %.1f ms (%llu built, %zu entries)",material_ms,
-    static_cast<unsigned long long>(material_profiles_built_-built_before),material_profiles_.size());
-   bridge_report_event("material_profiles_slow",line);
-  }
  }
  auto& layout=native_submission_layouts_[layout_slot];
  // The static sets (the D3D11 flush's rule): an unchanged set reuses its
@@ -6042,12 +6421,16 @@ HRESULT Renderer::flush_native_d3d12(unsigned layout_slot){
  // Frame buffers: dynamic bytes, the work list, the arguments (written by the
  // build dispatch from the batches' starting values) and its outputs.
  // (Phase 2: the set's own buffers from phase 1, the same layout: none grows.)
- if(FAILED(hr=native_d3d12_buffer(native12_.dynamic,phase==2?0:native_pending_upload_.size(),0,0))||
-    FAILED(hr=native_d3d12_buffer(native12_.work,UINT64(draw_count)*sizeof(NativeDrawWorkGpu),sizeof(NativeDrawWorkGpu),0))||
+ // Indexed object draws decided first: with them on, the visible list ends
+ // where the indexed batches' slots begin (NativeSubmissionLayout::indexed_first).
+ if(phase!=2)layout.indexed_build=layout.owners!=0&&indexed_object_draws_d3d12();
+ const UINT visible_slots=layout.indexed_build?layout.indexed_first:layout.triangles;
+ if(FAILED(hr=native_d3d12_frame_buffer(native12_.dynamic,phase==2?0:native_pending_upload_.size(),0,0))||
+    FAILED(hr=native_d3d12_frame_buffer(native12_.work,UINT64(draw_count)*sizeof(NativeDrawWorkGpu),sizeof(NativeDrawWorkGpu),0))||
     // The arguments, then the build's 32-byte entry per record (nativeBuildSelect).
-    FAILED(hr=native_d3d12_buffer(native12_.arguments,UINT64(layout.arguments.size())*sizeof(UINT)+UINT64(draw_count)*32u,0,kD3D12BufferUnordered|kD3D12BufferIndirect))||
-    FAILED(hr=native_d3d12_buffer(native12_.visible,UINT64((std::max)(1u,layout.triangles))*16u,16u,kD3D12BufferUnordered))||
-    FAILED(hr=native_d3d12_buffer(native12_.prepared,UINT64((std::max)(1u,layout.components))*sizeof(NativePreparedVertexGpu),sizeof(NativePreparedVertexGpu),kD3D12BufferUnordered))||
+    FAILED(hr=native_d3d12_frame_buffer(native12_.arguments,UINT64(layout.arguments.size())*sizeof(UINT)+UINT64(draw_count)*32u,0,kD3D12BufferUnordered|kD3D12BufferIndirect))||
+    FAILED(hr=native_d3d12_frame_buffer(native12_.visible,UINT64((std::max)(1u,visible_slots))*16u,16u,kD3D12BufferUnordered))||
+    FAILED(hr=native_d3d12_frame_buffer(native12_.prepared,UINT64((std::max)(1u,layout.components))*sizeof(NativePreparedVertexGpu),sizeof(NativePreparedVertexGpu),kD3D12BufferUnordered))||
     FAILED(hr=native_d3d12_persistent(native12_.world_vertices,UINT64(sizeof(NativeWorldVertexGpu))*64u,sizeof(NativeWorldVertexGpu),0))||
     FAILED(hr=ensure_native_world_states())||
     FAILED(hr=native_d3d12_persistent(native12_.world_states,UINT64(sizeof(NativeWorldStateGpu))*64u,sizeof(NativeWorldStateGpu),0))||
@@ -6057,13 +6440,13 @@ HRESULT Renderer::flush_native_d3d12(unsigned layout_slot){
  // Indexed object draws (option indexed_object_draws; native_shader.h
  // nativeOwnerOutput): while they draw, the build gives the layout's indexed
  // batches vertex owner entries (8 bytes an id) and index triples at their
- // visible triangles' slots (12 bytes each) instead of visible triangles.
+ // triangle slots past indexed_first (12 bytes each, the list holding only
+ // those) instead of visible triangles.
  // Phase 2 draws what phase 1 built, from the set's own buffers.
  if(phase!=2){
-  layout.indexed_build=layout.owners!=0&&indexed_object_draws_d3d12();
   if(layout.indexed_build&&
-     (FAILED(hr=native_d3d12_buffer(native12_.owners,UINT64(layout.owners)*8u,8u,kD3D12BufferUnordered))||
-      FAILED(hr=native_d3d12_buffer(native12_.indices,UINT64((std::max)(1u,layout.triangles))*12u,0,kD3D12BufferUnordered))))return hr;
+     (FAILED(hr=native_d3d12_frame_buffer(native12_.owners,UINT64(layout.owners)*8u,8u,kD3D12BufferUnordered))||
+      FAILED(hr=native_d3d12_frame_buffer(native12_.indices,UINT64((std::max)(1u,layout.indexed_triangles))*12u,0,kD3D12BufferUnordered))))return hr;
  }
  const bool indexed_draws=layout.indexed_build;
  // A batch's arguments: an indexed batch's own five-word slot (also its plain draw's), else its four-word slot.
@@ -6124,7 +6507,7 @@ HRESULT Renderer::flush_native_d3d12(unsigned layout_slot){
  }
  // The world fog frame values (b10) for this flush (bind_world_fog keeps them).
  if(FAILED(hr=bind_world_fog()))return hr;
- std::array<std::uint8_t,sizeof(native_world_clip_)*2+80> clip;native_world_clip_values(clip);
+ std::array<std::uint8_t,sizeof(native_world_clip_)*2+96> clip;native_world_clip_values(clip);
  if(phase==2)clip=kept_entry->clip; // the values its prepass drew with
  if(phase!=2){
  transition_profile_pass("compute_build");
@@ -6172,7 +6555,7 @@ HRESULT Renderer::flush_native_d3d12(unsigned layout_slot){
   if(!native_dispatch_dimensions(range.count,width,height)||!native_dispatch_dimensions((range.count+63u)/64u,record_width,record_height))
    return HRESULT_FROM_WIN32(ERROR_ARITHMETIC_OVERFLOW);
   const auto step=[&](UINT chunks,UINT x,UINT y,UINT z){
-   const std::array<UINT,8> work_range{range.first,range.count,previous_world?upscale12_.motion_stamp:0u,indexed_draws?1u:0u,chunks,build_scratch,capture_lod?1u:0u,0u};
+   const std::array<UINT,8> work_range{range.first,range.count,previous_world?upscale12_.motion_stamp:0u,indexed_draws?layout.indexed_first+1u:0u,chunks,build_scratch,capture_lod?1u:0u,0u};
    d3d12_->set_constants(4,work_range.data(),sizeof(work_range));
    return d3d12_->dispatch(programs[2],x,y,z);
   };
@@ -6194,7 +6577,9 @@ HRESULT Renderer::flush_native_d3d12(unsigned layout_slot){
  // The slim terrain pass (option terrain_slim; the D3D11 flush's rule): with this frame's material cache on.
  const int terrain_slim_drawn=terrain_slim_mode(debug_overlay_.config(),true);
  // (A deferring phase 1 draws no terrain material: its phase 2 takes the pass.)
- bool terrain_slim=terrain2_cache_on_&&!scene_composited_&&!hit_test_active_&&terrain_slim_drawn>0&&!defer;
+ // The Low pixel path draws no slim pass (the D3D11 flush's slim_candidate: never under low_pixels).
+ bool terrain_slim=terrain2_cache_on_&&!scene_composited_&&!hit_test_active_&&terrain_slim_drawn>0&&!defer&&
+  !native_low_pixel_path(debug_overlay_.config());
  // Its mask (R32_UINT winner keys, terrainSlimKey), made when the pass is
  // first wanted, at the prepass targets' size (ensure_prepass_targets_d3d12
  // drops it when they change).
@@ -6391,7 +6776,24 @@ HRESULT Renderer::flush_native_d3d12(unsigned layout_slot){
   if(off_materials)list.push_back("NATIVE_OFF_MATERIALS");
   return find_program("nativePS",std::move(list));
  };
- const ShaderProgram* const object_ps=pixel_program({});
+ // The Low pixel path (native_low_pixel_path; the D3D11 flush's low_pixels):
+ // with every feature the full programs serve off, objects, figures and
+ // terrain draw the lean NATIVE_LOW programs, as do the prepass and the
+ // shadow mask (resolve_world_shadow_mask_d3d12), with no material instance
+ // split and no slim terrain pass. Without it this backend shaded the same
+ // pixels with the full programs (issue #320: 2-7x the D3D11 pass times on
+ // an Intel Iris Xe at Lowest).
+ const ShaderProgram* const low_ps=find_program("nativePS",{"NATIVE_LOW"});
+ const ShaderProgram* const low_unlit_ps=find_program("nativePS",{"NATIVE_LOW","NATIVE_UNLIT"});
+ const ShaderProgram* const low_masked_ps=find_program("nativePS",{"NATIVE_SHADOW_MASK","NATIVE_LOW"});
+ const ShaderProgram* const low_prepass_ps=find_program("nativePrepassPS",{"NATIVE_LOW"});
+ const bool low_pixels=native_low_pixel_path(debug_overlay_.config())&&low_ps&&low_masked_ps&&low_prepass_ps;
+ if(native_low_pixel_path(debug_overlay_.config())&&!low_pixels&&!low_programs_missing_reported_){
+  low_programs_missing_reported_=true;
+  bridge_report_event("d3d12_low_pixels","programs missing (NATIVE_LOW object, masked or prepass): the full programs draw");
+ }
+ if(low_pixels)d3d12_->count("world flushes on the Low pixel path (NATIVE_LOW programs)");
+ const ShaderProgram* const object_ps=low_pixels?low_ps:pixel_program({});
  const ShaderProgram* const gltf_ps=pixel_program({"NATIVE_GLTF"});
  const ShaderProgram* const gltf_masked_ps=pixel_program({"NATIVE_GLTF","NATIVE_SHADOW_MASK"});
  const ShaderProgram* const gltf_motion_ps=pixel_program({"NATIVE_GLTF","NATIVE_OBJECT_MOTION"});
@@ -6426,6 +6828,8 @@ HRESULT Renderer::flush_native_d3d12(unsigned layout_slot){
  // draws it with the guide targets unblended (kCustomGuideTargetsOpaque).
  const auto guide_twin=[&](const ShaderProgram& pixel,const NativeStateBucket& bucket,const D3D12NativeState& state,bool blended=false)->const ShaderProgram*{
   if(!guide_flush)return nullptr;
+  // The liquid bodies' twins are drawn by their own rule (liquid_guide_twin below), never as a material twin.
+  if(std::strcmp(pixel.entry,"nativeLiquidPS")==0)return nullptr;
   // Why a world draw of a guide frame writes no guides (session counts in host.log).
   if(bucket.opacity==NativeOpacityClass::ordered){d3d12_->count("world draws without guides: ordered (blended in order)");return nullptr;}
   if(state.custom_blend.custom||(!blended&&fixed_blend_desc(state.blend).RenderTarget[0].BlendEnable)){d3d12_->count("world draws without guides: blend enabled");return nullptr;}
@@ -6435,7 +6839,8 @@ HRESULT Renderer::flush_native_d3d12(unsigned layout_slot){
  };
  // The astral rift programs (NATIVE_ASTRAL): batches of astral records only.
  const ShaderProgram* const astral_vs=find_program("nativeVS",{"NATIVE_ASTRAL"});
- const ShaderProgram* const astral_ps=pixel_program({"NATIVE_ASTRAL"});
+ const ShaderProgram* const astral_low_ps=low_pixels?find_program("nativePS",{"NATIVE_ASTRAL","NATIVE_LOW"}):nullptr;
+ const ShaderProgram* const astral_ps=astral_low_ps?astral_low_ps:pixel_program({"NATIVE_ASTRAL"});
  // Material instances (renderer.h kNativeInstance*; the D3D11 flush's rule):
  // world figure and object batches draw their instance's program (object,
  // prepassed, and each with the object motion), F10 shader_split_check the
@@ -6444,7 +6849,7 @@ HRESULT Renderer::flush_native_d3d12(unsigned layout_slot){
  const int split_check_mode=configured_integer(debug_overlay_.config(),"shader_split_check",0);
  // F10 fur_debug draws through the check programs too (only they carry its code).
  const bool split_check=split_check_mode>0||fur_debug_!=0;
- const bool split=!off_materials&&(split_check||configured_boolean(debug_overlay_.config(),"shader_split",true));
+ const bool split=!off_materials&&!low_pixels&&(split_check||configured_boolean(debug_overlay_.config(),"shader_split",true));
  // slot*2+masked, then the motion programs, then both again without the contact blend (not units),
  // then all four groups again for dry frames (NATIVE_FRAME_DRY). A group without a program for a slot
  // (the check programs, units without the contact blend) is never selected for it.
@@ -6460,9 +6865,10 @@ HRESULT Renderer::flush_native_d3d12(unsigned layout_slot){
  // Their indexed twins (append_native_indexed_programs), drawn by a layout's indexed batches while indexed_draws.
  const auto& indexed_vertex=indexed_draws?native12_.indexed_vertex:no_vertex_programs;
  // With a trail field: the snow trail variants (NATIVE_SNOW_TRAILS), as the D3D11 flush picks them.
- const ShaderProgram* const terrain_ps=snow_field?pixel_program({"NATIVE_TERRAIN_PS","NATIVE_SNOW_TRAILS"}):pixel_program({"NATIVE_TERRAIN_PS"});
+ // Low: terrain draws the Low object program (every terrain stage is off there); a trail field keeps its variants.
+ const ShaderProgram* const terrain_ps=snow_field?pixel_program({"NATIVE_TERRAIN_PS","NATIVE_SNOW_TRAILS"}):low_pixels?low_ps:pixel_program({"NATIVE_TERRAIN_PS"});
  const ShaderProgram* const terrain_flat_ps=snow_field?pixel_program({"NATIVE_TERRAIN_PS","NATIVE_SNOW_TRAILS","NATIVE_TERRAIN_FLAT"}):
-  pixel_program({"NATIVE_TERRAIN_PS","NATIVE_TERRAIN_FLAT"});
+  low_pixels?low_ps:pixel_program({"NATIVE_TERRAIN_PS","NATIVE_TERRAIN_FLAT"});
  // The liquid programs (append_native_shader_programs' nativeLiquidPS variants).
  const auto liquid_program=[&](std::initializer_list<const char*> names)->const ShaderProgram*{
   return find_program("nativeLiquidPS",std::vector<const char*>(names));
@@ -6496,6 +6902,42 @@ HRESULT Renderer::flush_native_d3d12(unsigned layout_slot){
  // reach its water; a neighbour map's water keeps the frame's full set.
  // A reused bake has no queue: its per-batch totals stand in for the draw walks.
  const auto baked_batch=[&](std::size_t index){return static_reuse?&bake.batches[index]:nullptr;};
+ // Fire burn: the burn programs only for a batch whose XY range touches a
+ // burnt cell (fire_burn_touches; a neighbour map's never), from the same
+ // ranges the wading units use; worked out once per flush, only while the
+ // area holds a burn (user, cand-1128: a burn affects what it touches).
+ std::vector<std::uint8_t> burn_batches;
+ if(!fire_burn_cells_.empty()&&!fire_burns_.empty())try{
+  burn_batches.assign(layout.batches.size(),0);
+  for(std::size_t index=0;index<layout.batches.size();++index){
+   const NativeBatch& item=layout.batches[index];const auto* baked=baked_batch(index);
+   bool neighbour=false,unknown=false;
+   float lo[2]{std::numeric_limits<float>::max(),std::numeric_limits<float>::max()},hi[2]{-std::numeric_limits<float>::max(),-std::numeric_limits<float>::max()};
+   // Each draw's XY range (native_draw_burn_xy): its own bounds, or for a
+   // draw on a shared pose node - huts, walls, cacti and other structures,
+   // whose bounds the node owns - its pose root plus its geometry radius
+   // (user, cand-1128 c33b2141: object char broke when such batches read as
+   // touching nothing). A draw with neither keeps its batch on the burn
+   // programs.
+   if(baked){
+    neighbour=baked->neighbour;unknown=baked->burn_unbounded;
+    for(int axis=0;axis<2;++axis){lo[axis]=baked->burn_xy_min[axis];hi[axis]=baked->burn_xy_max[axis];}
+   }else for(std::size_t n=item.first_draw;n<item.first_draw+item.draw_count;++n){
+    const auto& queued=native_queued_draw(native_draw_order_[n]);
+    neighbour|=(queued.instance.flags&native_neighbour_flag)!=0;
+    float a[2],b[2];
+    if(!native_draw_burn_xy(queued,a,b)){unknown=true;continue;}
+    for(int axis=0;axis<2;++axis){lo[axis]=std::min(lo[axis],a[axis]);hi[axis]=std::max(hi[axis],b[axis]);}
+   }
+   if(unknown&&!fire_burn_unbounded_named_){fire_burn_unbounded_named_=true;
+    bridge_report_event("fire_burn_scope","a world batch holds a draw with neither bounds nor a pose root; it keeps the burn programs");}
+   burn_batches[index]=!neighbour&&(unknown||fire_burn_touches(lo,hi));
+  }
+ }catch(const std::bad_alloc&){burn_batches.clear();}
+ const auto burn_draws=[&](std::size_t index){d3d12_->set_substitute_draws(index<burn_batches.size()&&burn_batches[index]);};
+ // Every other draw (ground cover, shadows, effects) takes the substitutes
+ // as before once this flush is done, whichever way it returns.
+ struct BurnDrawsDone{Renderer* r;~BurnDrawsDone(){if(r->d3d12_)r->d3d12_->set_substitute_draws(true);}} burn_draws_done{this};
  const auto bind_batch_units=[&](const NativeBatch& item,const NativeSubmissionLayout::StaticBake::Batch* baked){
   bool neighbour=false;
   float lo[2]{std::numeric_limits<float>::max(),std::numeric_limits<float>::max()},hi[2]{-std::numeric_limits<float>::max(),-std::numeric_limits<float>::max()};
@@ -6540,18 +6982,18 @@ HRESULT Renderer::flush_native_d3d12(unsigned layout_slot){
  const ShaderProgram* const motion_vs=find_program("nativeMotionWorldVS",{"NATIVE_OBJECT_MOTION"});
  const ShaderProgram* const motion_object_ps=pixel_program({"NATIVE_OBJECT_MOTION"});
  const ShaderProgram* const motion_masked_ps=pixel_program({"NATIVE_OBJECT_MOTION","NATIVE_SHADOW_MASK"});
- const ShaderProgram* const general_prepass_ps=plain_program("nativePrepassPS");
+ const ShaderProgram* const general_prepass_ps=low_pixels?low_prepass_ps:plain_program("nativePrepassPS");
  // rt_sun_shadows: the prepass of traced sun frames (kRtPrepass); the plain
  // one while its pipeline is not built.
  const ShaderProgram* const rt_prepass_ps=native_traced_sun_&&rt12_.programs.size()>kRtPrepass?&rt12_.programs[kRtPrepass]:nullptr;
  // Material instance batches (no terrain records): the prepass program without the terrain receiver code.
- const ShaderProgram* const object_prepass_ps=configured_boolean(debug_overlay_.config(),"prepass_object_program",true)?
+ const ShaderProgram* const object_prepass_ps=!low_pixels&&configured_boolean(debug_overlay_.config(),"prepass_object_program",true)?
   find_program("nativePrepassPS",{"NATIVE_PREPASS_OBJECT"}):nullptr;
- const ShaderProgram* const masked_object_ps=pixel_program({"NATIVE_SHADOW_MASK"});
+ const ShaderProgram* const masked_object_ps=low_pixels?low_masked_ps:pixel_program({"NATIVE_SHADOW_MASK"});
  const ShaderProgram* const masked_terrain_ps=snow_field?pixel_program({"NATIVE_SHADOW_MASK","NATIVE_TERRAIN_PS","NATIVE_SNOW_TRAILS"}):
-  pixel_program({"NATIVE_SHADOW_MASK","NATIVE_TERRAIN_PS"});
+  low_pixels?low_masked_ps:pixel_program({"NATIVE_SHADOW_MASK","NATIVE_TERRAIN_PS"});
  const ShaderProgram* const masked_terrain_flat_ps=snow_field?pixel_program({"NATIVE_SHADOW_MASK","NATIVE_TERRAIN_PS","NATIVE_SNOW_TRAILS","NATIVE_TERRAIN_FLAT"}):
-  pixel_program({"NATIVE_SHADOW_MASK","NATIVE_TERRAIN_PS","NATIVE_TERRAIN_FLAT"});
+  low_pixels?low_masked_ps:pixel_program({"NATIVE_SHADOW_MASK","NATIVE_TERRAIN_PS","NATIVE_TERRAIN_FLAT"});
  // The slim terrain pass's programs (NATIVE_TERRAIN_SLIM; none with material quality Off).
  const ShaderProgram* const slim_terrain_ps=snow_field?pixel_program({"NATIVE_SHADOW_MASK","NATIVE_TERRAIN_PS","NATIVE_SNOW_TRAILS","NATIVE_TERRAIN_SLIM"}):
   pixel_program({"NATIVE_SHADOW_MASK","NATIVE_TERRAIN_PS","NATIVE_TERRAIN_SLIM"});
@@ -6640,7 +7082,7 @@ HRESULT Renderer::flush_native_d3d12(unsigned layout_slot){
   prepassed=kept_entry->prepassed;
   for(const auto value:prepassed)any_prepass|=value!=0;
   if(std::find(prepassed.begin(),prepassed.end(),std::uint8_t(2))!=prepassed.end())
-   d3d12_->set_resource(kShadowMaskSlotD3D12,shadow_mask12_.get());
+   d3d12_->set_resource(kShadowMaskSlotD3D12,shadow_mask_bound12_?shadow_mask_bound12_:shadow_mask12_.get());
   bind_world_targets_d3d12(kept_entry->history);
  }
  if(phase!=2&&any_prepass){
@@ -6661,7 +7103,7 @@ HRESULT Renderer::flush_native_d3d12(unsigned layout_slot){
   for(int round=0;round<(cutouts_last?2:1);++round)
   for(std::size_t batch_index=0;batch_index<layout.batches.size();++batch_index){
    if(!prepassed[batch_index])continue;
-   const NativeBatch& batch=layout.batches[batch_index];
+   const NativeBatch& batch=layout.batches[batch_index];burn_draws(batch_index);
    const NativeStateBucket& bucket=native_state_buckets_[batch.state_bucket];
    if(cutouts_last&&(bucket.opacity==NativeOpacityClass::cutout||bucket.state.render[D3DRENDERSTATE_ALPHATESTENABLE]!=FALSE)!=(round==1))continue;
    const auto* baked=baked_batch(batch_index);
@@ -6702,7 +7144,7 @@ HRESULT Renderer::flush_native_d3d12(unsigned layout_slot){
     if(indexed_batch&&!indexed_prepass_vs){drawn=false;d3d12_->omit("world batch (indexed vertex program missing)",true);return S_FALSE;}
     const auto draw_with=[&](const ShaderProgram& pixel)->HRESULT{
      if(indexed_prepass_vs){
-      d3d12_->set_index_buffer(native12_.indices.get(),UINT64(batch.output_triangle_base)*12u);
+      d3d12_->set_index_buffer(native12_.indices.get(),native_index_list_byte(layout,batch));
       const HRESULT result=d3d12_->draw_indexed_indirect(*indexed_prepass_vs,pixel,state,nullptr,*native12_.arguments,offset);
       d3d12_->set_index_buffer(nullptr);
       return result;
@@ -6760,7 +7202,7 @@ HRESULT Renderer::flush_native_d3d12(unsigned layout_slot){
  if(defer){
   try{early.assign(layout.batches.size(),0);}catch(const std::bad_alloc&){return E_OUTOFMEMORY;}
   for(std::size_t index=0;index<layout.batches.size();++index){
-   const NativeBatch& batch=layout.batches[index];
+   const NativeBatch& batch=layout.batches[index];burn_draws(index);
    if(prepassed[index]||!interface_batch(batch))continue;
    const NativeStateBucket& bucket=native_state_buckets_[batch.state_bucket];
    const FixedState& st=bucket.state;
@@ -6783,7 +7225,10 @@ HRESULT Renderer::flush_native_d3d12(unsigned layout_slot){
    deferred_world12_.push_back(std::move(entry));
   }catch(const std::bad_alloc&){return E_OUTOFMEMORY;}
   native_flush_deferred_=true;
-  d3d12_->count(layout_slot==3?"deferred world material: terrain set kept":layout_slot==4?"deferred world material: neighbour set kept":"deferred world material: static set kept");
+  static_assert(kNeighbourChunks==3,"one counter name per neighbour chunk");
+  d3d12_->count(layout_slot==3?"deferred world material: terrain set kept":layout_slot==2?"deferred world material: static set kept":
+   layout_slot==neighbour_chunk_layout(0)?"deferred world material: neighbour chunk 0 kept":
+   layout_slot==neighbour_chunk_layout(1)?"deferred world material: neighbour chunk 1 kept":"deferred world material: neighbour chunk 2 kept");
   material_pass=1;
  }
 
@@ -6906,7 +7351,7 @@ HRESULT Renderer::flush_native_d3d12(unsigned layout_slot){
   if(batch_index>=layout.batches.size())break;
   if(slim_replay&&!slim_drawn[batch_index])continue;
   if(!slim_replay&&slim_run_first==SIZE_MAX&&slim_candidate(batch_index))slim_run_first=batch_index;
-  const NativeBatch& batch=layout.batches[batch_index];
+  const NativeBatch& batch=layout.batches[batch_index];burn_draws(batch_index);
   const NativeStateBucket& bucket=native_state_buckets_[batch.state_bucket];
   if(!interface_batch(batch))continue;
   if(material_pass!=0&&(early.size()>batch_index&&early[batch_index])!=(material_pass==1))continue;
@@ -7051,7 +7496,14 @@ HRESULT Renderer::flush_native_d3d12(unsigned layout_slot){
    const bool gltf=draw.instance.skn_factors[3]>0;
    const ShaderProgram* gltf_pixel=object_motion?(masked?gltf_motion_masked_ps:gltf_motion_ps):(masked?gltf_masked_ps:gltf_ps);
    if(gltf&&!gltf_pixel)return E_FAIL;
-   const ShaderProgram& batch_ps=gltf?*gltf_pixel:instance_ps?*instance_ps:object_motion?(masked?*motion_masked_ps:*motion_object_ps):masked?*masked_object_ps:object_ps?*object_ps:programs[1];
+   // Low: a batch whose every draw is unlit and ordered (the stock sky) takes the unlit
+   // variant: no point lights, sun shadow or glow walk (the D3D11 flush's unlit_batch).
+   bool unlit_batch=low_pixels&&low_unlit_ps&&!astral_batch&&!instance_ps&&bucket.opacity==NativeOpacityClass::ordered;
+   if(baked)unlit_batch=unlit_batch&&baked->unlit;
+   for(std::size_t item=batch.first_draw;!baked&&unlit_batch&&item<batch.first_draw+batch.draw_count;++item)
+    unlit_batch=!native_queued_draw(native_draw_order_[item]).instance.lighting_enabled;
+   const ShaderProgram& batch_ps=gltf?*gltf_pixel:unlit_batch?*low_unlit_ps:
+    instance_ps?*instance_ps:object_motion?(masked?*motion_masked_ps:*motion_object_ps):masked?*masked_object_ps:object_ps?*object_ps:programs[1];
    const ShaderProgram* const guide_ps=guide_twin(batch_ps,bucket,state,true);
    // Symptom this rule answers: the player's unit, drawn with its blend on,
    // wrote no guides: the traced passes and Ray Reconstruction read the
@@ -7078,7 +7530,7 @@ HRESULT Renderer::flush_native_d3d12(unsigned layout_slot){
    const ShaderProgram& batch_vs=instance_vs?*instance_vs:object_motion?*motion_vs:programs[0];
    const auto batch_draw=[&](const ShaderProgram& pixel,const D3D12NativeState& drawn_state)->HRESULT{
     if(!indexed_vs)return d3d12_->draw_indirect(batch_vs,pixel,drawn_state,clipped?&clip_rect:nullptr,*native12_.arguments,batch_arguments(batch,batch_index));
-    d3d12_->set_index_buffer(native12_.indices.get(),UINT64(batch.output_triangle_base)*12u);
+    d3d12_->set_index_buffer(native12_.indices.get(),native_index_list_byte(layout,batch));
     const HRESULT drawn=d3d12_->draw_indexed_indirect(*indexed_vs,pixel,drawn_state,clipped?&clip_rect:nullptr,*native12_.arguments,batch_arguments(batch,batch_index));
     d3d12_->set_index_buffer(nullptr);
     return drawn;
@@ -7333,7 +7785,23 @@ HRESULT Renderer::flush_native_d3d12(unsigned layout_slot){
    if(!body||!foam_ps){d3d12_->omit("water surfaces (liquid program missing)",true);continue;}
    bind_batch_units(batch,baked);
    if(liquid_tessellated)d3d12_->count("liquid batches tessellated");
-   if(FAILED(hr=layer_draw(*body,2u,state,liquid_tessellated)))return hr;
+   // A guide frame: the body's guide twin (NATIVE_LIQUID_GUIDES, issue 283)
+   // scales the bed's guides under it by the water's transmittance, so the
+   // traced lamp and bounce light added after the world pass reach the bed
+   // through the water, not over it. The world targets return after it.
+   const auto liquid_twin=guide_flush?native12_.guide_twins.find(body):native12_.guide_twins.end();
+   if(liquid_twin!=native12_.guide_twins.end()){
+    D3D12NativeState guide_state=state;guide_state.custom_blend.custom|=D3D12NativeState::kCustomGuideLiquid;
+    bind_world_targets_d3d12(world_history_bound12_,false,true);
+    hr=layer_draw(*liquid_twin->second,2u,guide_state,liquid_tessellated);
+    bind_world_targets_d3d12(world_history_bound12_);
+    if(hr==S_OK)d3d12_->count("water bodies with their guides");
+    else if(hr==S_FALSE){ // the twin's pipeline is not built yet: the body draws without it this frame
+     d3d12_->count("water bodies without guides (twin pipeline not ready)");
+     hr=layer_draw(*body,2u,state,liquid_tessellated);
+    }
+   }else hr=layer_draw(*body,2u,state,liquid_tessellated);
+   if(FAILED(hr))return hr;
    // Foam: the liquid triangles again (layer bit 0), depth tested, never written.
    D3D12NativeState foam_state=state;foam_state.depth.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ZERO;
    if(FAILED(hr=layer_draw(*foam_ps,3u,foam_state,liquid_tessellated)))return hr;
@@ -7418,6 +7886,8 @@ HRESULT Renderer::flush_native_d3d12(unsigned layout_slot){
  // while their world vertices and the flush's lighting are still bound
  // (once: with the material kept, in its phase 2).
  if(material_pass!=1)draw_fur_records();
+ // Alt interact overlay (#315): once, with the material kept (phase 2 too).
+ if(material_pass!=1&&FAILED(hr=draw_interact_overlay_d3d12(layout,static_reuse)))return hr;
  // Later world passes (effects, marks) never write the history.
  if(world_history_bound12_&&world_d3d12_bound_&&!scene_composited_)bind_world_targets_d3d12();
  d3d12_->clear_slots();
@@ -7484,15 +7954,20 @@ HRESULT Renderer::flush_native_shadows_d3d12(){
   const ShaderProgram* const build_cs=program("nativeShadowBuildCS");
   const ShaderProgram* const shadow_vs=program("nativeShadowVS");
   const ShaderProgram* const shadow_ps=program("nativeShadowPS");
-  if(!prepare_cs||!commit_cs||!build_cs||!shadow_vs||!shadow_ps)return finish(E_FAIL);
+  // A point face checks its GPU-written arguments before its draws (#298).
+  const ShaderProgram* const guard_cs=point?program("nativeShadowArgsGuardCS"):nullptr;
+  if(!prepare_cs||!commit_cs||!build_cs||!shadow_vs||!shadow_ps||(point&&!guard_cs))return finish(E_FAIL);
   const UINT records=static_cast<UINT>(layout.work.size()),batches=static_cast<UINT>(layout.batches.size());
-  std::array<std::uint8_t,sizeof(native_world_clip_)*2+80> clip;native_world_clip_values(clip);
+  // The guard's expected slots follow every seeded one (point_shadow_args_expected).
+  const UINT64 argument_bytes=(std::max)(UINT64(layout.arguments.size())*sizeof(UINT),
+   point?((UINT64(layout.arguments.size())*sizeof(UINT)+15u)&~UINT64(15))+UINT64(batches)*16u:UINT64(0));
+  std::array<std::uint8_t,sizeof(native_world_clip_)*2+96> clip;native_world_clip_values(clip);
   D3D12Buffer* work=nullptr;
   if(records){
-   if(FAILED(hr=native_d3d12_buffer(native12_.dynamic,native_pending_upload_.size(),0,0))||
-      FAILED(hr=native_d3d12_buffer(native12_.work,UINT64(records)*sizeof(NativeDrawWorkGpu),sizeof(NativeDrawWorkGpu),0))||
-      FAILED(hr=native_d3d12_buffer(native12_.arguments,UINT64(layout.arguments.size())*sizeof(UINT),0,kD3D12BufferUnordered|kD3D12BufferIndirect))||
-      FAILED(hr=native_d3d12_buffer(native12_.visible,UINT64((std::max)(1u,layout.triangles))*16u,16u,kD3D12BufferUnordered))||
+   if(FAILED(hr=native_d3d12_frame_buffer(native12_.dynamic,native_pending_upload_.size(),0,0))||
+      FAILED(hr=native_d3d12_frame_buffer(native12_.work,UINT64(records)*sizeof(NativeDrawWorkGpu),sizeof(NativeDrawWorkGpu),0))||
+      FAILED(hr=native_d3d12_frame_buffer(native12_.arguments,argument_bytes,0,kD3D12BufferUnordered|kD3D12BufferIndirect))||
+      FAILED(hr=native_d3d12_frame_buffer(native12_.visible,UINT64((std::max)(1u,layout.triangles))*16u,16u,kD3D12BufferUnordered))||
       FAILED(hr=native_d3d12_persistent(native12_.world_vertices,UINT64(sizeof(NativeWorldVertexGpu))*64u,sizeof(NativeWorldVertexGpu),0))||
       FAILED(hr=ensure_native_world_states())||
       FAILED(hr=native_d3d12_persistent(native12_.world_states,UINT64(sizeof(NativeWorldStateGpu))*64u,sizeof(NativeWorldStateGpu),0))||
@@ -7613,6 +8088,21 @@ HRESULT Renderer::flush_native_shadows_d3d12(){
      if((hr=d3d12_->dispatch(*build_cs,width,height,chunks))!=S_OK)return FAILED(hr)?finish(hr):wait(hr);
      ++perf_native_compute_dispatches_;++native_frame_stats_.native_compute_dispatches;
     }
+    if(point&&batches){
+     // #298: the face's GPU-written arguments checked against the CPU's queue
+     // before any draw reads them (renderer_point_shadows.cpp).
+     const UINT expected=point_shadow_args_expected(layout,batches,slice);
+     if(expected==UINT_MAX)return finish(E_FAIL);
+     if(FAILED(hr=ensure_point_shadow_args_report()))return finish(hr);
+     if(FAILED(hr=d3d12_->write_buffer(*native12_.arguments,expected,shadow_args_upload_.data()+expected/4u,UINT64(batches)*16u)))return finish(hr);
+     bind_common();
+     d3d12_->set_unordered(1,native12_.arguments.get());
+     d3d12_->set_unordered(2,native12_.shadow_args_report.get());
+     const std::array<UINT,8> guard{(native_point_shadow_slot_%PointShadowTextureLayout::cubes_per_atlas)*6u+slice,batches,0,0,0,expected,0,0};
+     d3d12_->set_constants(4,guard.data(),sizeof(guard));
+     if((hr=d3d12_->dispatch(*guard_cs,(batches+63u)/64u,1,1))!=S_OK)return FAILED(hr)?finish(hr):wait(hr);
+     ++perf_native_compute_dispatches_;++native_frame_stats_.native_compute_dispatches;
+    }
     // The depth draws: every batch with triangles in this map.
     bind_common();
     d3d12_->set_resource(4,native12_.visible.get());
@@ -7726,7 +8216,25 @@ HRESULT Renderer::flush_native_shadows_d3d12(){
     // moves). Blade shadows need those texels; past the window the cover
     // casts no sun shadow in this mode. Slice 0 draws the cover with its
     // live sway (gcShadowVS: frozen only on maps 1 and 2).
-    native_rt_cover_source_=native_rt_cover_layer_=0xFF;
+    native_rt_cover_source_=native_rt_cover_layer_=native_rt_cover_coarse_=0xFF;
+    // Past that window (issue 276: plants and tumbleweeds lost their shadow
+    // at the bottom of the screen at normal zoom) the same casters come from
+    // a coarse layer in close slice 1, also free in this mode: this map's own
+    // fit, so they reach as far as the close map does. nativeRtCoverShadow
+    // takes the window inside it and the coarse layer outside.
+    if(native_traced_sun_&&slice==2&&native_shadow_frame_.slices[2].enabled&&!native_shadow_frame_.slices[1].enabled&&
+       configured_boolean(debug_overlay_.config(),"rt_sun_cover_shadows",true)){
+     native_rt_cover_source_=2;native_rt_cover_coarse_=1;
+     native_rt_cover_drawing_=true;const HRESULT uploaded=upload_native_shadow_constants(1);native_rt_cover_drawing_=false;
+     if(SUCCEEDED(uploaded)){
+      transition_profile_pass("rt_sun_cover_casters_coarse");
+      d3d12_->set_constants(2,&shadow12_.constants,sizeof(shadow12_.constants));
+      d3d12_->clear_depth_slice(maps,1,1.f);
+      d3d12_->set_depth_target(&maps,1,viewport);
+      draw_ground_cover_shadows_d3d12(slice,&viewport);draw_critter_shadows_d3d12(slice,&viewport);
+      d3d12_->count("rt_sun_shadows: coarse ground cover and critter caster layers drawn");
+     }else native_rt_cover_source_=native_rt_cover_coarse_=0xFF;
+    }
     if(native_traced_sun_&&slice==2&&native_shadow_frame_.slices[2].enabled&&!native_shadow_frame_.slices[0].enabled&&
        configured_boolean(debug_overlay_.config(),"rt_sun_cover_shadows",true)){
      const auto& fit=native_shadow_frame_.slices[2];
@@ -7769,7 +8277,7 @@ HRESULT Renderer::flush_native_shadows_d3d12(){
        d3d12_->set_depth_target(&maps,0,viewport);
        draw_ground_cover_shadows_d3d12(slice,&viewport);draw_critter_shadows_d3d12(slice,&viewport);
        d3d12_->count("rt_sun_shadows: ground cover and critter caster layers drawn");
-      }else native_rt_cover_source_=native_rt_cover_layer_=0xFF;
+      }else{native_rt_cover_layer_=0xFF;if(native_rt_cover_coarse_>=3)native_rt_cover_source_=0xFF;}
      }
     }
    }
@@ -7979,6 +8487,8 @@ void Renderer::apply_upscaler_mode_d3d12(){
   if(on!=rt_ao_enabled_){rt_ao_enabled_=on;if(!on)release_rt_ambient_occlusion_d3d12();}}
  // rt_emissive: with either of the two (particle lamps, lava at bounce hits).
  rt_emissive_enabled_=(rt_direct_enabled_||rt_indirect_enabled_)&&configured_boolean(debug_overlay_.config(),"rt_emissive",true);
+ // The global map screen: the output size without a temporal upscaler (the targets follow at the next bind).
+ if(update_upscaler_suspension(dlss>=0||fsr>=0))set_world_size();
  if(!(dlss_became_available&&dlss>=0)&&percent==render_scale_percent_&&dlss==dlss_mode_&&fsr==fsr_mode_&&rr==rr_enabled_)return;
  render_scale_percent_=percent;
  const bool mode_changed=dlss!=dlss_mode_||fsr!=fsr_mode_;
@@ -8055,12 +8565,12 @@ void Renderer::begin_object_motion_d3d12() noexcept{
 D3D12Buffer* Renderer::previous_world_vertices_d3d12() noexcept{
  auto& up=upscale12_;
  if(!up.motion_stamp||!temporal_upscaler()||!up.object_motion||!up.object_depth||!native12_.world_vertices)return nullptr;
- const UINT64 bytes=d3d12_->buffer_bytes(*native12_.world_vertices);
+ const UINT64 bytes=d3d12_->buffer_bytes(*native12_.world_vertices)/sizeof(NativeWorldVertexGpu)*sizeof(NativeMotionVertexGpu);
  if(!up.previous_world||d3d12_->buffer_bytes(*up.previous_world)!=bytes){
   D3D12BufferRef created;
   // Growth only (the same slots, more of them); a smaller buffer is a new world's.
   const UINT64 kept=up.previous_world?d3d12_->buffer_bytes(*up.previous_world):0;
-  if(FAILED(d3d12_->create_buffer(bytes,sizeof(NativeWorldVertexGpu),kD3D12BufferUnordered,created))||
+  if(FAILED(d3d12_->create_buffer(bytes,sizeof(NativeMotionVertexGpu),kD3D12BufferUnordered,created))||
      (kept&&kept<bytes&&FAILED(d3d12_->copy_buffer(*created,*up.previous_world,kept)))){
    up.previous_world.reset();
    static bool reported=false;
@@ -8141,6 +8651,14 @@ HRESULT Renderer::upscale_world_d3d12(){
  auto& post=post12_;
  if(post.programs.empty())SceneComposite::shader_programs(post.programs);
  if(post.programs.size()<10||!upscale12_.output||!upscale12_.resolved||!upscale12_.motion){d3d12_->omit("temporal upscaler (programs or targets missing)",true);return S_OK;}
+ // The first frame of the global map screen, before the suspension between
+ // frames takes it to the output size: no world camera, so no temporal upscaler.
+ if(!world_camera_last_){
+  dlss_reset_=true;dlss_previous_valid_=false;
+  const HRESULT hr=filtered_upscale_d3d12();
+  if(hr==S_OK)d3d12_->count("world frames without a world camera (filtered upscale)");
+  return hr;
+ }
  if(fsr_mode_>=0?render_fsr_d3d12():render_dlss_d3d12()){d3d12_->count(fsr_mode_>=0?"world frames upscaled (FSR 3.1)":"world frames upscaled (DLSS)");return S_OK;}
  const HRESULT hr=filtered_upscale_d3d12();
  if(hr==S_OK)d3d12_->count("world frames the upscaler did not take (filtered upscale)");
@@ -8625,6 +9143,116 @@ HRESULT Renderer::apply_gamma_ramp_d3d12(D3D12Texture* source,D3D12Texture* targ
  d3d12_->count("gamma ramp passes");
  profiler_.add_draw(1,1);profiler_.add_batch();
  return S_OK;
+}
+
+// ---- Alt interact overlay on D3D12 (#315; the D3D11 flush's, renderer_flush.cpp) ----
+// overlay12_programs_: append_interact_overlay_shader_programs (0 vertex,
+// 1 pixel, 2-3 the composite), then the indexed batches' vertex programs per
+// vertex class (4, 5). A pipeline still compiling leaves the overlay out
+// of that frame (S_FALSE, counted).
+HRESULT Renderer::draw_interact_overlay_d3d12(const NativeSubmissionLayout& layout,bool static_reuse) noexcept try{
+ if(!interact_overlay_||scene_composited_||hit_test_active_||!world_d3d12_bound_||!world_d3d12_||interact_overlay_failed_)return S_OK;
+ auto& marked=interact_overlay_batches_;marked.assign(layout.batches.size(),0);bool any=false;
+ // A work item names its batch by the batch's argument offset (indexed
+ // batches have their own): offset -> batch, built only on Alt frames.
+ std::vector<std::pair<UINT,UINT>> offsets;
+ for(const auto& work:layout.work){
+  if(work.record==UINT_MAX||work.record>=native_instance_records_.size())continue;
+  const UINT flags=native_instance_records_[work.record].command.instance.flags;
+  if((flags&native_sway_flag)!=0||(flags&native_overlay_mask)==0)continue;
+  if(offsets.empty()){
+   offsets.reserve(layout.batches.size());
+   for(std::size_t index=0;index<layout.batches.size();++index){
+    const NativeBatch& batch=layout.batches[index];
+    offsets.push_back({batch.indexed?batch.indexed_args_offset:static_cast<UINT>(index)*16u,static_cast<UINT>(index)});
+   }
+   std::sort(offsets.begin(),offsets.end());
+  }
+  const auto found=std::lower_bound(offsets.begin(),offsets.end(),std::pair<UINT,UINT>{work.indirect_args_byte_offset,0u});
+  if(found!=offsets.end()&&found->first==work.indirect_args_byte_offset){marked[found->second]=1;any=true;}
+ }
+ if(!any)return S_OK;
+ if(overlay12_programs_.empty()){
+  append_interact_overlay_shader_programs(overlay12_programs_);
+  append_interact_overlay_indexed_programs(overlay12_programs_);
+ }
+ UINT width=0,height=0,mips=0;DXGI_FORMAT format=DXGI_FORMAT_UNKNOWN;
+ if(!d3d12_->texture_info(*world_d3d12_,width,height,mips,format))return E_FAIL;
+ UINT have_width=0,have_height=0;
+ if(!overlay12_||!d3d12_->texture_info(*overlay12_,have_width,have_height,mips,format)||have_width!=width||have_height!=height){
+  overlay12_.reset();
+  if(FAILED(d3d12_->create_target(width,height,overlay12_,DXGI_FORMAT_R8G8B8A8_UNORM,DXGI_FORMAT_UNKNOWN))){
+   overlay12_.reset();interact_overlay_failed_=true;
+   bridge_report_event("interact_overlay_omitted","Alt interact overlay target could not be created; Alt shows no overlay.");
+   return S_OK;
+  }
+ }
+ transition_profile_pass("interact_overlay");
+ if(interact_overlay_drawn_frame_!=native_frame_index_){
+  const float clear[4]{};d3d12_->clear_texture(*overlay12_,clear);interact_overlay_drawn_frame_=native_frame_index_;
+ }
+ D3D12Texture* const target=overlay12_.get();d3d12_->set_targets(&target,1,nullptr);
+ D3D12NativeState state;
+ state.raster=fixed_raster_desc(D3DCULL_NONE,false,true);
+ state.depth=fixed_depth_desc(FALSE,FALSE,D3DCMP_ALWAYS);
+ state.blend=fixed_blend_choice(FALSE,D3DBLEND_ONE,D3DBLEND_ZERO,false);
+ const bool neighbour_terrain_blend=configured_boolean(debug_overlay_.config(),"terrain_blend_neighbours",true);
+ const bool neighbour_fog_skip=configured_boolean(debug_overlay_.config(),"neighbour_fog_skip",true);
+ HRESULT hr=S_OK;
+ for(std::size_t index=0;index<layout.batches.size();++index){
+  if(!marked[index])continue;
+  const NativeBatch& batch=layout.batches[index];
+  const NativeStateBucket& bucket=native_state_buckets_[batch.state_bucket];
+  if(bucket.semantic_kind==SemanticKind::terrain)continue;
+  if(batch.geometry_page>=native_geometry_pages_.size()||!native_geometry_pages_[batch.geometry_page].d3d12)continue;
+  const auto* baked=static_reuse?&layout.static_bake.batches[index]:nullptr;
+  const NativeQueuedDraw& draw=baked?native_instance_records_[baked->first_record].command:native_queued_draw(native_draw_order_[batch.first_draw]);
+  ID3D11ShaderResourceView* contact_views[4]{};
+  Constants constants;native_batch_constants(batch,draw,bucket,contact_views,neighbour_terrain_blend,neighbour_fog_skip,false,&constants);
+  d3d12_->set_constants(0,&constants,sizeof(constants));
+  d3d12_->set_resource(1,native_geometry_pages_[batch.geometry_page].d3d12.get());
+  // The material's sampler (its texture is each record's bindless index):
+  // nativeOverlayPS hides what the material pass's alpha hides.
+  {const FixedState& st=bucket.state;
+   d3d12_->set_sampler(0,world_texture_sampler(st.stage[0][D3DTSS_MINFILTER],st.stage[0][D3DTSS_MAGFILTER],st.stage[0][D3DTSS_MIPFILTER],
+    st.stage[0][D3DTSS_ADDRESSU],st.stage[0][D3DTSS_ADDRESSV],true,1u<<configured_integer(debug_overlay_.config(),"anisotropy",3)).description);}
+  HRESULT drawn=S_OK;
+  // As the colour pass: index triples only while this layout's indexed build
+  // wrote them; an indexed batch's records count into its own five-word slot.
+  if(batch.indexed&&layout.indexed_build){
+   const std::size_t vertex_class=native_instance_vertex_class(batch.material_instance);
+   if(vertex_class>=kNativeInstanceVertexClasses)continue;
+   d3d12_->set_index_buffer(native12_.indices.get(),native_index_list_byte(layout,batch));
+   drawn=d3d12_->draw_indexed_indirect(overlay12_programs_[4+vertex_class],overlay12_programs_[1],state,nullptr,*native12_.arguments,batch.indexed_args_offset);
+   d3d12_->set_index_buffer(nullptr);
+  }else drawn=d3d12_->draw_indirect(overlay12_programs_[0],overlay12_programs_[1],state,nullptr,*native12_.arguments,
+   batch.indexed?batch.indexed_args_offset:static_cast<UINT>(index)*16u);
+  if(drawn==S_FALSE)d3d12_->omit("interact overlay batch (pipeline not ready)",false);
+  else if(FAILED(drawn)){hr=drawn;break;}
+  profiler_.add_draw(0,static_cast<UINT>(batch.draw_count));profiler_.add_batch();
+ }
+ bind_world_targets_d3d12(world_history_bound12_);
+ return hr;
+}catch(...){return E_OUTOFMEMORY;}
+
+void Renderer::composite_interact_overlay_d3d12() noexcept{
+ if(interact_overlay_drawn_frame_!=native_frame_index_||!overlay12_||overlay12_programs_.size()<4)return;
+ interact_overlay_drawn_frame_=UINT64_MAX;
+ transition_profile_pass("interact_overlay_composite");
+ d3d12_->set_target(nullptr);
+ D3D12NativeState state;
+ state.raster=fixed_raster_desc(D3DCULL_NONE,false,true);
+ state.depth=fixed_depth_desc(FALSE,FALSE,D3DCMP_ALWAYS);
+ state.custom_blend.custom=D3D12NativeState::kCustomBlendOver;
+ state.custom_blend.source=D3D11_BLEND_SRC_ALPHA;state.custom_blend.destination=D3D11_BLEND_INV_SRC_ALPHA;
+ state.custom_blend.source_alpha=D3D11_BLEND_ZERO;state.custom_blend.destination_alpha=D3D11_BLEND_ONE;
+ d3d12_->set_resource(0,overlay12_.get());
+ D3D11_SAMPLER_DESC linear{};linear.Filter=D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+ linear.AddressU=linear.AddressV=linear.AddressW=D3D11_TEXTURE_ADDRESS_CLAMP;linear.MaxLOD=D3D11_FLOAT32_MAX;
+ d3d12_->set_sampler(0,linear);
+ const HRESULT drawn=d3d12_->draw(overlay12_programs_[2],overlay12_programs_[3],state,nullptr,3);
+ if(drawn==S_FALSE)d3d12_->omit("interact overlay composite (pipeline not ready)",false);
+ d3d12_->set_resource(0,static_cast<const D3D12Texture*>(nullptr));
 }
 
 #endif // !EID3D11_SHADER_EMBED

@@ -150,9 +150,17 @@ public:
     void set_serial_shader_preparation(bool serial) noexcept {
         if (serial_shader_preparation_ != serial) { serial_shader_preparation_ = serial; mark_changed(); }
     }
-    // True when the loaded file carried [overlay] mode (players then keep the
-    // developer monitor they chose; otherwise players start hidden).
-    bool overlay_mode_loaded() const noexcept { return overlay_mode_loaded_; }
+    // [overlay] developer_views=true: a player install (no
+    // EI_RENDERER_DEVELOPER) starts with the saved [overlay] mode. Missing:
+    // players start with the developer views hidden; Shift+F10 shows them (#274).
+    // Set only by editing the ini; saved back once true.
+    bool developer_views() const noexcept { return developer_views_; }
+    // The one-time introduction window was dismissed ([setup] intro_shown,
+    // #274). Missing key or file: not shown yet. Only written once true.
+    bool intro_shown() const noexcept { return intro_shown_; }
+    void set_intro_shown(bool shown) noexcept {
+        if (intro_shown_ != shown) { intro_shown_ = shown; mark_changed(); }
+    }
     // [setup] settings_version of the loaded file (0: missing, older build
     // or no file). Saving writes this value; the renderer's migration raises
     // it after dropping the values whose registered default changed since.
@@ -197,7 +205,8 @@ private:
     bool over_budget_pending_ = false;
     bool serial_shader_preparation_ = false;
     std::string nvidia_cache_id_;
-    bool overlay_mode_loaded_ = false;
+    bool developer_views_ = false;
+    bool intro_shown_ = false;
     int settings_version_ = 0;
     bool dirty_ = false;
     std::uint64_t revision_ = 0;

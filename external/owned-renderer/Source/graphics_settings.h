@@ -10,8 +10,10 @@ class RendererConfig;
 // Player graphics presets. The preset table in graphics_settings.cpp is the
 // single place that says what each preset sets; High equals the registered
 // option defaults, so a fresh eid3d11.ini reads as High.
-enum class GraphicsPreset : std::uint8_t { low = 0, medium, high, ultra, custom };
-constexpr int kGraphicsPresetCount = 4;
+// The preset is never stored, only detected from the options, so this order
+// is free to change (Lowest went in front of Low without a migration).
+enum class GraphicsPreset : std::uint8_t { lowest = 0, low, medium, high, ultra, custom };
+constexpr int kGraphicsPresetCount = 5;
 
 const char* graphics_preset_name(GraphicsPreset preset) noexcept;
 const char* graphics_preset_summary(GraphicsPreset preset) noexcept;
@@ -25,7 +27,7 @@ struct PlayerGraphicsSetting {
     const char* tooltip;    // short plain-language explanation
     const char* choices;    // '\0'-separated labels for integer levels (index = value - minimum), or nullptr
     bool in_preset;         // false: a taste/comfort option the preset never touches
-    float values[kGraphicsPresetCount];  // Low, Medium, High, Ultra (bool: 0/1)
+    float values[kGraphicsPresetCount];  // Lowest, Low, Medium, High, Ultra (bool: 0/1)
 };
 
 const PlayerGraphicsSetting* player_graphics_settings(std::size_t& count) noexcept;
@@ -42,10 +44,12 @@ GraphicsPreset detect_graphics_preset(const RendererConfig& config) noexcept;
 GraphicsPreset reapply_graphics_preset_before(RendererConfig& config, int saved_version) noexcept;
 // True for a key that the named presets set.
 bool graphics_preset_row(const char* key) noexcept;
-// First-run suggestion from the adapter: integrated (UMA) GPUs get Low,
-// discrete cards are graded by their WDDM local-memory budget (64-bit even
-// in this 32-bit process). A rough hint only; the player chooses.
-GraphicsPreset suggest_graphics_preset(bool integrated, std::uint64_t video_memory_bytes) noexcept;
+// First-run suggestion from the adapter: integrated (UMA) GPUs get Lowest,
+// older discrete cards (modern false: no Direct3D 12 ray tracing tier 1.1)
+// Low, modern ones are graded by their WDDM local-memory budget (64-bit even
+// in this 32-bit process). A rough hint only; the player chooses. It never
+// turns ray tracing on: no preset sets the rt_* options.
+GraphicsPreset suggest_graphics_preset(bool integrated, bool modern, std::uint64_t video_memory_bytes) noexcept;
 
 // Ray tracing preset: the player's choice over the ray traced options, its
 // own group beside the graphics presets (Low..Ultra never touch rt_*). It

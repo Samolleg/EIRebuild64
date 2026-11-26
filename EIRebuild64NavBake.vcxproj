@@ -26,7 +26,7 @@
   </ItemDefinitionGroup>
   <Target Name="LinkSharedNavigationHost" BeforeTargets="Link">
     <ItemGroup>
-      <Link Include="$(MSBuildThisFileDirectory)out\obj\x64\$(Configuration)\EI_Rebuild\*.obj" Exclude="$(MSBuildThisFileDirectory)out\obj\x64\$(Configuration)\EI_Rebuild\Navigation_Cache.obj;$(MSBuildThisFileDirectory)out\obj\x64\$(Configuration)\EI_Rebuild\DetourTileCache*.obj" />
+      <Link Include="$(MSBuildThisFileDirectory)out\obj\x64\$(Configuration)\EI_Rebuild\*.obj" Exclude="$(MSBuildThisFileDirectory)out\obj\x64\$(Configuration)\EI_Rebuild\Navigation_Cache.obj;$(MSBuildThisFileDirectory)out\obj\x64\$(Configuration)\EI_Rebuild\DetourTileCache*.obj;$(MSBuildThisFileDirectory)out\obj\x64\$(Configuration)\EI_Rebuild\E1RendererFacadeCheck.obj" />
     </ItemGroup>
     <Error Condition="!Exists('$(MSBuildThisFileDirectory)out\obj\x64\$(Configuration)\EI_Rebuild\NavigationWorld.obj')" Text="Build the EI_Rebuild project before linking NavBake." />
   </Target>

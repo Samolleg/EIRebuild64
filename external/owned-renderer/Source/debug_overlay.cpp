@@ -20,6 +20,7 @@
 #include "dlss_frame.h"
 
 #include <dxgi1_4.h>
+#include <d3d12.h>
 
 #include "../ThirdParty/imgui/imgui.h"
 #include "../ThirdParty/imgui/backends/imgui_impl_dx11.h"
@@ -207,6 +208,11 @@ const char* blocked_option_note(const RendererConfig& config, const char* key) {
         const RendererOption* head = config.find("portrait_head");
         if (head && head->type == RendererOptionType::boolean && !head->boolean_value) return "needs real head portraits";
     }
+    // Structures burn only with the land burn (update_fire_burns).
+    if (std::strcmp(key, "fire_burn_structures") == 0 && g_running_d3d12) {
+        const RendererOption* burn = config.find("fire_burn");
+        if (burn && burn->type == RendererOptionType::boolean && !burn->boolean_value) return "needs Fire burns the land";
+    }
     // The 64-bit render host cannot run on 32-bit Windows or without its exe.
     if (std::strcmp(key, "x64_render_host") == 0) return x64remote::host_unavailable_reason();
     // Direct3D 12 runs in the 64-bit render host.
@@ -215,10 +221,13 @@ const char* blocked_option_note(const RendererConfig& config, const char* key) {
         const RendererOption* host = config.find("x64_render_host");
         if (host && host->type == RendererOptionType::boolean && !host->boolean_value) return "needs 64-bit render host";
     }
-    // Frame generation, its floor, Reflex and latency pacing exist on the
-    // Direct3D 12 backend only (a changed Renderer starts after a restart).
+    // Frame generation, its floor, Reflex, latency pacing and fire burn exist
+    // on the Direct3D 12 backend only (a changed Renderer starts after a
+    // restart). Fire burn's programs are twins in the D3D12 table only
+    // (renderer_fire_burn.cpp); bridge_set_fire_burn needs renderer_backend 1.
     if (!g_running_d3d12 && (std::strcmp(key, "frame_generation") == 0 || std::strcmp(key, "frame_generation_min_fps") == 0 ||
-                             std::strcmp(key, "reflex") == 0 || std::strcmp(key, "latency_pacing") == 0))
+                             std::strcmp(key, "reflex") == 0 || std::strcmp(key, "latency_pacing") == 0 ||
+                             std::strcmp(key, "fire_burn") == 0 || std::strcmp(key, "fire_burn_structures") == 0))
         return configured_value(config, "renderer_backend") != 1 ? "needs Direct3D 12 renderer" :
                g_running_renderer && std::strstr(g_running_renderer, "Direct3D 12 refused") ? "Direct3D 12 could not start (Direct3D 11 runs)" :
                "Direct3D 12 starts after a restart";
@@ -300,6 +309,43 @@ void help_marker(const char* text) {
     }
 }
 
+// UTF-8 to lower-case UTF-16 (CharLowerBuffW folds Cyrillic and every other
+// script; ImGuiTextFilter folds ASCII bytes only, so a lower-case Russian word missed its capitalised label).
+std::wstring folded_text(const char* text) {
+    std::wstring wide;
+    const int length = text && *text ? MultiByteToWideChar(CP_UTF8, 0, text, -1, nullptr, 0) : 0;
+    if (length <= 1) return wide;
+    wide.resize(static_cast<std::size_t>(length));
+    MultiByteToWideChar(CP_UTF8, 0, text, -1, wide.data(), length);
+    wide.resize(static_cast<std::size_t>(length - 1));
+    CharLowerBuffW(wide.data(), static_cast<DWORD>(wide.size()));
+    return wide;
+}
+
+// The search box's text against an option's shown text, with ImGuiTextFilter's
+// syntax: comma-separated terms, any one matches; "-term" excludes.
+bool search_matches(const ImGuiTextFilter& filter, const std::string& text) {
+    const std::wstring query = folded_text(filter.InputBuf), haystack = folded_text(text.c_str());
+    bool any_include = false, included = false;
+    std::size_t start = 0;
+    while (start <= query.size()) {
+        std::size_t end = query.find(L',', start);
+        if (end == std::wstring::npos) end = query.size();
+        std::wstring term = query.substr(start, end - start);
+        start = end + 1;
+        const auto first = term.find_first_not_of(L' '), last = term.find_last_not_of(L' ');
+        if (first == std::wstring::npos) continue;
+        term = term.substr(first, last - first + 1);
+        if (term[0] == L'-') {
+            if (term.size() > 1 && haystack.find(term.c_str() + 1) != std::wstring::npos) return false;
+            continue;
+        }
+        any_include = true;
+        if (haystack.find(term) != std::wstring::npos) included = true;
+    }
+    return !any_include || included;
+}
+
 // Over-budget marker: the game's orderly quit is WM_QUIT reaching its main
 // loop (NGame::QuitProgram posts it; WinMain then releases its textures,
 // interface and visualizator, and only after that the DirectDraw object).
@@ -372,7 +418,11 @@ struct DebugOverlay::Implementation {
     bool developer = false;
     bool settings_open = false;
     bool settings_first_run = false;
+    bool first_run_suggestion_synced = false;  // reapply_first_run_suggestion ran
     bool settings_first_frame = false;
+    // The one-time introduction (#274) shows in place of the window until
+    // Continue; then the window itself follows.
+    bool settings_intro = false;
     // VRAM budget: the save warning (MiB of the estimate and the budget) and
     // the one-time notice after an over-budget session ended uncleanly.
     bool vram_warning_open = false;
@@ -986,7 +1036,7 @@ void draw_graphics_tab(RendererConfig& config, ImGuiTextFilter& filter, bool dia
            (!diagnostics && interface_option(option)!=ui_only))continue;
         const std::string searchable = std::string(ui_option_label(option)) + " " + option.label + " " + option.key +
                                        " " + option.group + " " + ui_option_description(option);
-        if (!filter.PassFilter(searchable.c_str())) continue;
+        if (!search_matches(filter, searchable)) continue;
         shown.push_back(&option);
         if (std::none_of(groups.begin(), groups.end(), [&](const std::string* group) { return *group == option.group; }))
             groups.push_back(&option.group);
@@ -1366,8 +1416,15 @@ void draw_hud_editor(DebugOverlay::Implementation& state,RendererConfig& config)
                 left=std::clamp(left,0.f,(std::max)(0.f,layout.width-width));
                 top=std::clamp(top,0.f,(std::max)(0.f,layout.height-height));
                 if(HudPanel(i)==HudPanel::messages) {
-                    config.set_floating_point("message_panel_x",(left+width*.5f)*100.f/layout.width);
-                    config.set_floating_point("message_panel_y",top*100.f/layout.height);
+                    // A panel at a screen edge stores 0 or 100: the layout clamps it
+                    // to that edge at any size or aspect (16:9 -> 21:9 -> 32:9), as
+                    // the other panels' free-space percentages do.
+                    const bool at_left=left<=.5f,at_right=left+width>=layout.width-.5f;
+                    const bool at_top=top<=.5f,at_bottom=top+height>=layout.height-.5f;
+                    config.set_floating_point("message_panel_x",at_left && !at_right?0.f:at_right && !at_left?100.f:
+                        (left+width*.5f)*100.f/layout.width);
+                    config.set_floating_point("message_panel_y",at_top && !at_bottom?0.f:at_bottom && !at_top?100.f:
+                        top*100.f/layout.height);
                 } else {
                     float x,y;widescreen_hud_position_percent(HudPanel(i),left/sx,top/sy,width/sx,height/sy,x,y);
                     config.set_floating_point((key+"_x").c_str(),x);
@@ -1655,7 +1712,21 @@ void close_settings(DebugOverlay::Implementation& state, RendererConfig& config,
     }
     state.settings_open = false;
     state.settings_first_run = false;
+    state.settings_intro = false;
     state.settings_snapshot.clear();
+}
+
+// Continue on the introduction: remembered at once, then the settings
+// window it introduced. While the first-run window is still owed this one
+// closes and the first-run window opens on the next frame, after this save,
+// so its previewed suggestion is saved only by its own OK.
+void finish_intro(DebugOverlay::Implementation& state, RendererConfig& config) {
+    config.set_intro_shown(true);
+    state.pending_save = true;
+    state.settings_intro = false;
+    state.settings_first_frame = true;
+    if (first_run_settings_due(config.first_run_done(), state.developer)) close_settings(state, config, true);
+    else open_settings(state, config, false);  // Cancel keeps the language chosen in the introduction
 }
 
 // Options that size one group of the video memory breakdown; the window
@@ -2003,7 +2074,7 @@ void draw_player_setting(RendererConfig& config, const PlayerGraphicsSetting& se
             }
             ImGui::EndDisabled();
             ImGui::SetItemTooltip(ui_text("Apply without restarting. Borderless uses the monitor size; windowed fits the requested client size to the work area."));
-            if (state.display_apply_result[0]) ImGui::TextWrapped("%s", state.display_apply_result);
+            if (state.display_apply_result[0]) ImGui::TextWrapped("%s", ui_text(state.display_apply_result));
         } else if (std::strcmp(setting.key, "frame_limit") == 0) {
             // Off / fixed rates / Custom; Custom shows a rate slider below.
             const char* labels = ui_choices("Off\0" "30\0" "60\0" "90\0" "120\0" "144\0" "165\0" "240\0" "Custom\0");
@@ -2052,8 +2123,57 @@ void draw_player_setting(RendererConfig& config, const PlayerGraphicsSetting& se
     ImGui::PopID();
 }
 
+// The one-time introduction (#274): what the main graphics choices do and
+// where the settings are. Continue, Enter or Esc goes on to the settings.
+void draw_intro_window(DebugOverlay::Implementation& state, RendererConfig& config) {
+    const float scale = state.ui_scale;
+    const ImGuiIO& io = ImGui::GetIO();
+    const float width = std::min(560.f * scale, io.DisplaySize.x * .95f);
+    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * .5f, io.DisplaySize.y * .5f), ImGuiCond_Always, ImVec2(.5f, .5f));
+    bool next = false;
+    if (ImGui::Begin(window_title("Welcome", "intro").c_str(), nullptr,
+                     ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_AlwaysAutoResize)) {
+        if (state.settings_first_frame) {
+            ImGui::SetWindowFocus();
+            state.settings_first_frame = false;
+        }
+        int language = configured_value(config, "ui_language");
+        ImGui::SetNextItemWidth(width - ImGui::GetStyle().WindowPadding.x * 2.f);
+        if (ImGui::Combo("##intro_language", &language, ui_choices(kUiLanguageChoices)))
+            config.set_integer("ui_language", language);
+        ImGui::PushTextWrapPos(width - ImGui::GetStyle().WindowPadding.x);
+        ImGui::TextWrapped("%s", ui_text("The game is drawn by the EID3D11 renderer. These choices decide how it looks and how fast it runs:"));
+        static constexpr const char* kChoices[] = {
+            "Preset: Low, Medium, High or Ultra sets all graphics options at once. Choose a lower one if the game stutters.",
+            "Renderer: Direct3D 11 or Direct3D 12. Direct3D 12 runs in the 64-bit render host and is needed for frame "
+            "generation and NVIDIA Reflex. Applies after restarting the game.",
+            "Upscaling: NVIDIA DLSS (RTX cards) or AMD FSR (most cards) renders the world at a lower resolution and "
+            "rebuilds a sharp image, for more frames per second.",
+            "Ray tracing (experimental): rays for shadows, light and reflections. Needs Direct3D 12 and a ray tracing "
+            "graphics card, and costs a lot of GPU time.",
+        };
+        for (const char* choice : kChoices) {
+            ImGui::Bullet();
+            ImGui::SameLine();
+            ImGui::TextWrapped("%s", ui_text(choice));
+        }
+        ImGui::Spacing();
+        ImGui::TextWrapped("%s", ui_text("F10 opens the graphics settings at any time; Shift+F10 shows the developer views. Continue opens the settings now."));
+        ImGui::PopTextWrapPos();
+        ImGui::Spacing();
+        next = ImGui::Button(ui_text("Continue"), ImVec2(130.f * scale, 0.f)) ||
+               ImGui::IsKeyPressed(ImGuiKey_Enter, false) || ImGui::IsKeyPressed(ImGuiKey_Escape, false);
+    }
+    ImGui::End();
+    if (next) finish_intro(state, config);
+}
+
 void draw_settings_window(DebugOverlay::Implementation& state, RendererConfig& config,
                           const RendererResourceSnapshot& resources) {
+    if (state.settings_intro) {
+        draw_intro_window(state, config);
+        return;
+    }
     const float scale = state.ui_scale;
     const ImGuiIO& io = ImGui::GetIO();
     ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * .5f, io.DisplaySize.y * .5f), ImGuiCond_Appearing,
@@ -2080,7 +2200,7 @@ void draw_settings_window(DebugOverlay::Implementation& state, RendererConfig& c
             ImGui::TextColored(ImVec4(1.f, .8f, .3f, 1.f), ui_text("4 GB memory mode is off"));
             ImGui::SetItemTooltip(ui_text("game.exe can use only 2 GB of memory; large maps with high settings may run out."));
             if (state.large_address_result) {
-                ImGui::TextWrapped("%s", state.large_address_result);
+                ImGui::TextWrapped("%s", ui_text(state.large_address_result));
             } else if (ImGui::Button(ui_text("Enable 4 GB mode (restart required)"))) {
                 state.large_address_result = enable_large_address_mode();
             }
@@ -2103,7 +2223,7 @@ void draw_settings_window(DebugOverlay::Implementation& state, RendererConfig& c
             state.preset_slider = slider;
             apply_graphics_preset(config, static_cast<GraphicsPreset>(slider));
         }
-        ImGui::SetItemTooltip(ui_text("Drag to choose Low, Medium, High or Ultra. Changing an advanced option below makes it Custom. Upscaling and render scale stay your own settings."));
+        ImGui::SetItemTooltip(ui_text("Drag to choose Lowest, Low, Medium, High or Ultra. Changing an advanced option below makes it Custom. Upscaling and render scale stay your own settings."));
         // Stop labels under the slider.
         const float width = ImGui::GetContentRegionAvail().x;
         const float left = ImGui::GetCursorPosX();
@@ -2143,7 +2263,7 @@ void draw_settings_window(DebugOverlay::Implementation& state, RendererConfig& c
             auto matches = [&](const PlayerGraphicsSetting& setting) {
                 const std::string text = std::string(ui_setting_label(setting)) + " " + setting.label + " " + setting.key + " " +
                                          ui_text(setting.category) + " " + ui_setting_tooltip(setting);
-                return state.settings_filter.PassFilter(text.c_str());
+                return search_matches(state.settings_filter, text);
             };
             bool any_match = false;
             for (std::size_t category = 0; category < category_count; ++category) {
@@ -2253,8 +2373,42 @@ std::uint64_t adapter_local_budget(ID3D11Device* device, IDXGIAdapter* native_ad
     return budget;
 }
 
+// The adapter's Direct3D 12 ray tracing tier (0: none, or no Direct3D 12;
+// -1: not asked). Only the x64 render host asks, which runs this overlay in
+// core mode and loads Direct3D 12 anyway. The 32-bit game process never
+// does (pure x86 mode, no host): the D3D12 runtime and the driver's D3D12
+// user-mode driver would stay mapped for the session in an address space
+// that is already short (#20). First run and the over-budget reset only;
+// the device is released at once (DRED and debug-layer settings apply to
+// the host's own later device).
+int adapter_raytracing_tier([[maybe_unused]] IDXGIAdapter* adapter) noexcept {
+#if !defined(_WIN64)
+    return -1;
+#else
+    const HMODULE module = LoadLibraryExW(L"d3d12.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    if (!module) return 0;
+    int tier = 0;
+    const auto create = reinterpret_cast<PFN_D3D12_CREATE_DEVICE>(GetProcAddress(module, "D3D12CreateDevice"));
+    ID3D12Device* device = nullptr;
+    if (create && SUCCEEDED(create(adapter, D3D_FEATURE_LEVEL_11_0, __uuidof(ID3D12Device), reinterpret_cast<void**>(&device)))) {
+        D3D12_FEATURE_DATA_D3D12_OPTIONS5 options5{};
+        if (SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS5, &options5, sizeof(options5))))
+            tier = static_cast<int>(options5.RaytracingTier);
+        device->Release();
+    }
+    // Left loaded: the host links the D3D12 runtime anyway.
+    return tier;
+#endif
+}
+
 // First-run hint: UMA adapters expose no non-local segment; discrete cards
-// are graded by their local budget (DXGI_ADAPTER_DESC sizes are 32-bit here).
+// are graded by GPU class, then by their local budget (DXGI_ADAPTER_DESC
+// sizes are 32-bit here). Modern class: ray tracing tier 1.1 (RTX 20 and
+// later, Radeon RX 6000 and later, Arc). NVIDIA's compute fallback reports
+// tier 1.0 on GTX 10 and 16 cards (the GTX 1070 Ti tester's host.log: "tier
+// value 10"), so 1.0 is not the class; cards without Direct3D 12 report 0.
+// In pure x86 mode the class is unknown (tier -1): every discrete card
+// starts on Low, the safe end of the ladder.
 void suggest_for_adapter(DebugOverlay::Implementation& state, ID3D11Device* device, IDXGIAdapter* native_adapter) {
     IDXGIDevice* dxgi_device = nullptr;
     IDXGIAdapter* adapter = native_adapter;
@@ -2283,7 +2437,14 @@ void suggest_for_adapter(DebugOverlay::Implementation& state, ID3D11Device* devi
             }
             adapter3->Release();
         }
-        state.suggested_preset = suggest_graphics_preset(integrated, memory);
+        const int raytracing_tier = integrated ? 0 : adapter_raytracing_tier(adapter);
+        const bool modern = raytracing_tier >= D3D12_RAYTRACING_TIER_1_1;
+        state.suggested_preset = suggest_graphics_preset(integrated, modern, memory);
+        char detail[256];
+        std::snprintf(detail, sizeof(detail), "adapter=%s integrated=%d raytracing_tier=%d modern=%d budget=%lluMiB preset=%s",
+                      state.adapter_name, integrated ? 1 : 0, raytracing_tier, modern ? 1 : 0,
+                      static_cast<unsigned long long>(memory >> 20), graphics_preset_name(state.suggested_preset));
+        bridge_report_event("first_run_preset", detail);
         adapter->Release();
     }
     if (dxgi_device) dxgi_device->Release();
@@ -2325,10 +2486,20 @@ DebugOverlay::~DebugOverlay() {
     shutdown();
 }
 
+// Players start with the developer views hidden unless [overlay]
+// developer_views=true (#274): an ini copied from a developer install
+// (mode=compact) reached testers, and in core mode the game process sends its
+// loaded mode to the host, so every load hides them, not only the host's own.
+// Shift+F10 still shows them for the session.
+static void hide_developer_views_for_players(RendererConfig& config, bool developer) noexcept {
+    if (!developer && !config.developer_views()) config.set_overlay_mode(DebugOverlayMode::hidden);
+}
+
 void DebugOverlay::load_config_only(const wchar_t* config_path) {
     shutdown();
     const std::wstring path = config_path && *config_path ? std::wstring(config_path) : renderer_config_path();
     config_.load(path.c_str());
+    hide_developer_views_for_players(config_, renderer_developer_mode());
     set_ui_language(configured_value(config_, "ui_language"));
 }
 
@@ -2350,10 +2521,15 @@ HRESULT DebugOverlay::initialize(HWND window, ID3D11Device* device, ID3D11Device
     state->developer = renderer_developer_mode();
     state->large_address_aware = running_image_large_address_aware();
     remove_previous_patched_image();
-    // Players start without developer windows unless their ini chose one.
-    if (!state->developer && !config_.overlay_mode_loaded()) config_.set_overlay_mode(DebugOverlayMode::hidden);
-    if (first_run_settings_due(config_.first_run_done(), state->developer))
+    hide_developer_views_for_players(config_, state->developer);
+    if (first_run_settings_due(config_.first_run_done(), state->developer)) {
         suggest_for_adapter(*state, device, native_adapter);
+        // The suggestion runs from the first frame, not only once the player
+        // has clicked through the introduction to the first-run window (an
+        // Iris Xe at the High defaults drew the main menu at 0.1 fps). The
+        // window still opens with it selected; its OK sets first_run_done.
+        if (state->suggested_preset != GraphicsPreset::custom) apply_graphics_preset(config_, state->suggested_preset);
+    }
     // Crash safety net: settings saved past the VRAM budget and no clean exit
     // since (crash, hang, driver reset). Back to the adapter suggestion.
     if (config_.over_budget_pending()) {
@@ -2486,6 +2662,7 @@ void DebugOverlay::reload_config() noexcept {
     try {
         const std::wstring path = implementation_ ? implementation_->config_path : renderer_config_path();
         config_.load(path.c_str());
+        hide_developer_views_for_players(config_, implementation_ ? implementation_->developer : renderer_developer_mode());
         config_.clear_dirty();
         set_ui_language(configured_value(config_, "ui_language"));
     } catch (...) {}
@@ -2747,6 +2924,28 @@ void request_capture(DebugOverlay::Implementation& state, const RendererConfig& 
     }
 }
 
+// Developer mode: F10 = developer cycle, Shift+F10 = player settings.
+// Players: the other way round (#274: players start with the developer views
+// hidden unless [overlay] developer_views=true, but Shift+F10 still cycles them).
+void DebugOverlay::press_f10(bool shift) noexcept {
+    if (!implementation_) return;
+    std::lock_guard<std::recursive_mutex> guard(debug_overlay_lock());
+    auto& state = *implementation_;
+    // Players get no developer views (release 2026-11-20): Shift+F10 does
+    // nothing unless the developer environment or [overlay] developer_views=true.
+    if (!state.developer && shift && !config_.developer_views()) return;
+    if (state.developer != shift) {
+        config_.set_overlay_mode(next_debug_overlay_mode(config_.overlay_mode()));
+        state.pending_save = true;
+    } else if (state.settings_intro) {
+        finish_intro(state, config_);
+    } else if (state.settings_open) {
+        close_settings(state, config_, true);
+    } else {
+        open_settings(state, config_, false);
+    }
+}
+
 void DebugOverlay::maintain() noexcept {
     if (!implementation_) return;
     std::lock_guard<std::recursive_mutex> guard(debug_overlay_lock());
@@ -2761,18 +2960,7 @@ void DebugOverlay::maintain() noexcept {
     const bool f10_down = !core_input && native_user_input_enabled() && (GetAsyncKeyState(VK_F10) & 0x8000) != 0;
     const bool focused = native_user_input_enabled() && (host_child ? implementation_->external_focused : GetForegroundWindow() == implementation_->window);
     const bool shift_down = native_user_input_enabled() && ((GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0 || owned::controller_modifier_down(VK_SHIFT));
-    if (focused && f10_down && !implementation_->f10_was_down) {
-        // Developer mode: F10 = developer cycle, Shift+F10 = player settings.
-        // Players: the other way round.
-        if (implementation_->developer != shift_down) {
-            config_.set_overlay_mode(next_debug_overlay_mode(config_.overlay_mode()));
-            implementation_->pending_save = true;
-        } else if (implementation_->settings_open) {
-            close_settings(*implementation_, config_, true);
-        } else {
-            open_settings(*implementation_, config_, false);
-        }
-    }
+    if (focused && f10_down && !implementation_->f10_was_down) press_f10(shift_down);
     implementation_->f10_was_down = f10_down;
     // Core mode: F11 goes to the host as its own command (core_present).
     const bool f11_down = !core_input && !host_child && native_user_input_enabled() && (GetAsyncKeyState(VK_F11) & 0x8000) != 0;
@@ -2908,12 +3096,34 @@ bool DebugOverlay::settings_open() const noexcept {
 
 bool DebugOverlay::first_run_pending() const noexcept {
     return implementation_ && !implementation_->settings_open &&
-           first_run_settings_due(config_.first_run_done(), implementation_->developer);
+           (first_run_settings_due(config_.first_run_done(), implementation_->developer) ||
+            first_run_settings_due(config_.intro_shown(), implementation_->developer));
+}
+
+bool DebugOverlay::reapply_first_run_suggestion() noexcept {
+    if (!implementation_ || implementation_->first_run_suggestion_synced) return false;
+    auto& state = *implementation_;
+    state.first_run_suggestion_synced = true;
+    if (!first_run_settings_due(config_.first_run_done(), state.developer) ||
+        state.suggested_preset == GraphicsPreset::custom || detect_graphics_preset(config_) == state.suggested_preset)
+        return false;
+    apply_graphics_preset(config_, state.suggested_preset);
+    return true;
 }
 
 void DebugOverlay::open_first_run_settings() noexcept {
     if (!native_user_input_enabled()) return;
-    if (first_run_pending()) open_settings(*implementation_, config_, true);
+    if (!first_run_pending()) return;
+    auto& state = *implementation_;
+    const bool intro = first_run_settings_due(config_.intro_shown(), state.developer);
+    open_settings(state, config_, !intro);
+    state.settings_intro = intro && state.settings_open;
+}
+
+bool DebugOverlay::continue_intro() noexcept {
+    if (!implementation_ || !implementation_->settings_intro) return false;
+    finish_intro(*implementation_, config_);
+    return true;
 }
 
 bool DebugOverlay::graphics_reset_notice_pending() const noexcept {
@@ -2967,7 +3177,8 @@ const char* vram_budget_level_text(unsigned level) noexcept {
     case 0: return "none";
     case 1: return "textures 1/2";
     case 2: return "textures 1/2, shadows 1/2";
-    default: return "textures 1/4, shadows 1/2";
+    case 3: return "textures 1/4, shadows 1/2";
+    default: return "textures 1/4, shadows 1/2, every unused texture, no terrain face cache";
     }
 }
 

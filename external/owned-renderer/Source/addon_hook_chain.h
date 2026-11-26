@@ -63,4 +63,17 @@ EntryResolution resolve_entry_owner(const std::uint8_t* entry,
                                     std::size_t hook_bytes,
                                     bool (*callback_owned)(const void*)) noexcept;
 
+// A raw detour from another module can sit on top of an addon chain: it kept
+// the addon's `jmp dispatcher` as its continuation and calls it through a
+// pointer. Returns the dispatcher stored at `slot` when it is the addon's
+// generated dispatcher for `entry` (its forwarder replays `stock` and returns
+// to the entry), and its callback; nullptr otherwise. The entry bytes are the
+// other module's and are not checked.
+const std::uint8_t* layered_framework_dispatcher(const std::uint8_t* entry,
+                                                 const std::uint8_t* const* slot,
+                                                 const std::uint8_t* stock,
+                                                 std::size_t stock_bytes,
+                                                 bool (*callback_owned)(const void*),
+                                                 const std::uint8_t** callback) noexcept;
+
 } // namespace owned

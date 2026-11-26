@@ -1269,7 +1269,7 @@ void CombatUiRenderer::draw_settings(RendererConfig& config) {
         }
     }
     auto& shared = state(); std::array<CombatEffectDefinition, 256> catalog;
-    { std::lock_guard<std::mutex> guard(shared.lock); ImGui::TextDisabled("%s", shared.status.c_str()); catalog = shared.catalog; }
+    { std::lock_guard<std::mutex> guard(shared.lock); ImGui::TextDisabled("%s", ui_text(shared.status.c_str())); catalog = shared.catalog; }
     if (!ImGui::CollapsingHeader(ui_text("Effect list"))) return;
     if (ImGui::BeginTable("CombatEffectList", 5, ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY, ImVec2(0, 230))) {
         ImGui::TableSetupColumn(ui_text("Effect")); ImGui::TableSetupColumn(ui_text("Priority")); ImGui::TableSetupColumn(ui_text("Visibility")); ImGui::TableSetupColumn(ui_text("Type")); ImGui::TableSetupColumn(ui_text("Icon")); ImGui::TableHeadersRow();

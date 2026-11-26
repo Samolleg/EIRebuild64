@@ -3502,21 +3502,22 @@ bool widescreen_hud_panel_bounds(HudPanel panel,HudPanelBounds& bounds) noexcept
     return panel_bounds(i,object,bounds);
 }
 
-void widescreen_hud_position_percent(HudPanel panel,float left,float top,float width,float height,float& x,float& y) noexcept {
+HudPositionTerms widescreen_hud_position_terms(HudPanel panel) noexcept {
     const unsigned i=unsigned(panel);const auto* object=current_panel(i);
-    float ax=0.f,ay=0.f,cw=width,ch=height;
+    HudPositionTerms t;
     if(object && slot_panel(i)) {
         const int d=slot_direction(i);const auto anchor=kPanelRoles[i].anchor;
-        ax=anchor.x==Anchor::end?1.f:anchor.x==Anchor::centre?.5f:0.f;
-        ay=anchor.y==Anchor::end?1.f:anchor.y==Anchor::centre?.5f:0.f;
-        if(i==4 && g_hud_panels[i].direction==0)ax=.5f,ay=1.f;
-        else if(d>=2)ax=d==2?0.f:1.f;else ay=d==1?0.f:1.f;
-        const auto r=panel_native_rect(i,object);slot_dimensions(i,0,object,cw,ch);
-        cw*=width/(std::max)(1.f,float(r.right-r.left));ch*=height/(std::max)(1.f,float(r.bottom-r.top));
+        t.anchor_x=anchor.x==Anchor::end?1.f:anchor.x==Anchor::centre?.5f:0.f;
+        t.anchor_y=anchor.y==Anchor::end?1.f:anchor.y==Anchor::centre?.5f:0.f;
+        if(i==4 && g_hud_panels[i].direction==0)t.anchor_x=.5f,t.anchor_y=1.f;
+        else if(d>=2)t.anchor_x=d==2?0.f:1.f;else t.anchor_y=d==1?0.f:1.f;
+        const auto r=panel_native_rect(i,object);float cw=0.f,ch=0.f;slot_dimensions(i,0,object,cw,ch);
+        t.content_x=cw/(std::max)(1.f,float(r.right-r.left));t.content_y=ch/(std::max)(1.f,float(r.bottom-r.top));
     }
-    x=g_layout.width>cw?(left+ax*(width-cw))*100.f/(g_layout.width-cw):0.f;
-    y=g_layout.height>ch?(top+ay*(height-ch))*100.f/(g_layout.height-ch):0.f;
-    x=std::clamp(x,0.f,100.f);y=std::clamp(y,0.f,100.f);
+    return t;
+}
+void widescreen_hud_position_percent(HudPanel panel,float left,float top,float width,float height,float& x,float& y) noexcept {
+    hud_position_percent(widescreen_hud_position_terms(panel),g_layout.width,g_layout.height,left,top,width,height,x,y);
 }
 
 bool widescreen_replaces_hud_frame(const void* figure) noexcept {

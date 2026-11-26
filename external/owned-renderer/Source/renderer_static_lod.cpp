@@ -16,12 +16,46 @@ namespace {
 // (GD3D11 uses the same 0.5 / 0.5 for its static LOD).
 constexpr float kNormalWeight = 0.5f;
 constexpr float kUvWeight = 0.5f;
-// Target triangle share of each level against the full mesh.
-constexpr float kLevelRatio[kStaticLodMaxLevels] = {0.5f, 0.25f, 0.125f};
 // A level must drop at least this share of the previous level's triangles.
 constexpr float kMinimumStep = 0.85f;
 
 } // namespace
+
+bool simplify_mesh_levels(const float* positions, std::size_t vertex_count, const float* attributes,
+    const std::uint32_t* source, std::size_t index_count, float scale, NativeMeshLods& output, bool lock_border) noexcept try {
+    output = {};
+    if (!positions || !attributes || !source || !vertex_count || index_count % 3 || !index_count ||
+        !(scale > 0) || !std::isfinite(scale))
+        return false;
+    std::vector<std::uint32_t> indices(source, source + index_count);
+    for (const std::uint32_t index : indices) if (index >= vertex_count) return false;
+    const float weights[5] = {kNormalWeight, kNormalWeight, kNormalWeight, kUvWeight, kUvWeight};
+    std::vector<std::uint32_t> reduced(index_count);
+    std::size_t previous = index_count;
+    float previous_error = 0;
+    for (std::uint32_t level = 0; level < kStaticLodMaxLevels; ++level) {
+        const std::size_t target = (std::max)(std::size_t(3),
+            std::size_t(double(index_count / 3) * kStaticLodLevelRatio[level]) * 3u);
+        float error = 0;
+        // Open borders stay (walls, planks, cards, atlas chart seams): a moved
+        // border edge changes the silhouette. The error bound is open; the
+        // renderer picks a level only where its error projects below its pixel limit.
+        const std::size_t count = meshopt_simplifyWithAttributes(reduced.data(), indices.data(), index_count,
+            positions, vertex_count, 12, attributes, 20, weights, 5, nullptr,
+            target, 1.0f, lock_border ? meshopt_SimplifyLockBorder : 0u, &error);
+        if (count < 3 || count % 3 || float(count) > float(previous) * kMinimumStep || !std::isfinite(error)) break;
+        auto& stored = output.indices[level];
+        stored.assign(reduced.begin(), reduced.begin() + std::ptrdiff_t(count));
+        previous_error = (std::max)(previous_error, error * scale);
+        output.error[level] = previous_error;
+        output.levels = level + 1;
+        previous = count;
+    }
+    return output.levels != 0;
+} catch (...) {
+    output = {};
+    return false;
+}
 
 bool build_static_lods(const FigureCpuAsset& figure, NativeMeshLods& output) noexcept try {
     output = {};
@@ -64,31 +98,9 @@ bool build_static_lods(const FigureCpuAsset& figure, NativeMeshLods& output) noe
         for (unsigned k = 0; k < 5; ++k) if (!std::isfinite(attribute[k])) return false;
     }
     if (!(largest_scale > 0) || !std::isfinite(largest_scale)) return false;
-    std::vector<std::uint32_t> indices(figure.indices.begin(), figure.indices.end());
-    for (const std::uint32_t index : indices) if (index >= vertex_count) return false;
-    const float weights[5] = {kNormalWeight, kNormalWeight, kNormalWeight, kUvWeight, kUvWeight};
-    std::vector<std::uint32_t> reduced(index_count);
-    std::size_t previous = index_count;
-    float previous_error = 0;
-    for (std::uint32_t level = 0; level < kStaticLodMaxLevels; ++level) {
-        const std::size_t target = (std::max)(std::size_t(3),
-            std::size_t(double(index_count / 3) * kLevelRatio[level]) * 3u);
-        float error = 0;
-        // Open borders stay (walls, planks, cards): a moved border edge
-        // changes the silhouette. The error bound is open; the renderer picks
-        // a level only where its error projects below its pixel limit.
-        const std::size_t count = meshopt_simplifyWithAttributes(reduced.data(), indices.data(), index_count,
-            positions.data(), vertex_count, 12, attributes.data(), 20, weights, 5, nullptr,
-            target, 1.0f, meshopt_SimplifyLockBorder, &error);
-        if (count < 3 || count % 3 || float(count) > float(previous) * kMinimumStep || !std::isfinite(error)) break;
-        auto& stored = output.indices[level];
-        stored.assign(reduced.begin(), reduced.begin() + std::ptrdiff_t(count));
-        previous_error = (std::max)(previous_error, error * largest_scale);
-        output.error[level] = previous_error;
-        output.levels = level + 1;
-        previous = count;
-    }
-    return output.levels != 0;
+    const std::vector<std::uint32_t> indices(figure.indices.begin(), figure.indices.end());
+    return simplify_mesh_levels(positions.data(), vertex_count, attributes.data(), indices.data(), index_count,
+                                largest_scale, output);
 } catch (...) {
     output = {};
     return false;

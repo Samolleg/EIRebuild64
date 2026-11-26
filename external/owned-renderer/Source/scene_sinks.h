@@ -65,9 +65,8 @@ struct SceneSinks {
      if(!request.world_to_clip){result.failure_hresult=E_INVALIDARG;result.failure_operation="scene.static_clip";return false;}
      const HRESULT hr=request.terrain?renderer.flush_native_static_terrain(self.state,*request.world_to_clip):
       renderer.flush_native_static(self.state,*request.world_to_clip);
-     if(FAILED(hr)){result.failure_hresult=hr;result.failure_operation="scene.static_flush";
-      char detail[96];std::snprintf(detail,sizeof(detail),"hr=%08lx draws=%zu",static_cast<unsigned long>(hr),renderer.native_static_draw_count());
-      owned::bridge_append_probe_event("static_flush_failed",detail);return false;}
+     renderer.report_static_flush_failure(hr,request.terrain);
+     if(FAILED(hr)){result.failure_hresult=hr;result.failure_operation="scene.static_flush";return false;}
      return true;
     }
     bool registered=false;HRESULT hr=S_OK;
@@ -143,7 +142,7 @@ struct SceneSinks {
   try{return of(context).renderer->set_native_world_lighting(lighting);}catch(...){return false;}
  }
  static bool pointLights(void* context,const RetainedVisualFrame& frame) noexcept{
-  try{of(context).renderer->set_fire_spells(frame.fire_spells,frame.time);return of(context).renderer->set_native_point_lights(frame.world_point_lights,frame.time);}catch(...){return false;}
+  try{of(context).renderer->set_fire_spells(frame.fire_spells,frame.time);of(context).renderer->set_interact_overlay(frame.alt_overlay);return of(context).renderer->set_native_point_lights(frame.world_point_lights,frame.time);}catch(...){return false;}
  }
  static bool pointShadowBatch(void* context,std::uint64_t& generation,bool& pressure) noexcept{
   try{auto& self=of(context);if(self.batch_active)return false;self.flushUi();self.sequence=true;

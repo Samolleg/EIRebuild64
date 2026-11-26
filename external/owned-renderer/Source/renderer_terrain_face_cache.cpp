@@ -4,6 +4,7 @@
 // virtual atlas per map and level, pages baked on demand by rasterising
 // their triangles into one shared pool, read by the terrain pixel stage
 // instead of running terrain2Color.
+#include "graphics_settings.h"
 #include "terrain_face_atlas.h"
 #include "neighbour_piece.h"
 #include "worker_priority.h"
@@ -13,6 +14,9 @@
 #include "owned_terrain_front_end.h"
 #include "point_shadow_types.h"
 #include "contact_blend.h"
+#include "owned_resource_runtime.h"
+#include "retained_static_scene.h"
+#include "owned_asset_loader.h"
 #include <d3dcompiler.h>
 #include <algorithm>
 #include <chrono>
@@ -627,12 +631,15 @@ HRESULT Renderer::create_terrain_face_map() noexcept try {
 // copying the resident slots.
 bool Renderer::grow_terrain_face_pool(std::uint32_t slices) noexcept try {
     const std::uint32_t old = face_slices_;
-    if (slices <= old) return true;
+    // Growing keeps every slice; shrinking (the caller emptied the slots of
+    // the slices that go) keeps the first ones.
+    if (slices == old || !slices) return slices == old;
     if (slices > D3D11_REQ_TEXTURE2D_ARRAY_AXIS_DIMENSION) return false;
     const auto add_slots = [&] {
         face_slices_ = slices;
-        const std::uint32_t first = std::uint32_t(face_slots_.size());
+        const std::uint32_t first = std::uint32_t((std::min)(face_slots_.size(), std::size_t(slices) * kTerrainFaceCacheSlotsPerSlice));
         face_slots_.resize(std::size_t(slices) * kTerrainFaceCacheSlotsPerSlice);
+        face_free_.erase(std::remove_if(face_free_.begin(), face_free_.end(), [&](std::uint32_t s) { return s >= face_slots_.size(); }), face_free_.end());
         for (std::uint32_t s = std::uint32_t(face_slots_.size()); s-- > first;) face_free_.push_back(s);
     };
     if (d3d12_) {
@@ -641,7 +648,7 @@ bool Renderer::grow_terrain_face_pool(std::uint32_t slices) noexcept try {
         if (FAILED(d3d12_->create_storage_texture(UINT(kTerrainFaceCacheSlice), UINT(kTerrainFaceCacheSlice), 0, DXGI_FORMAT_R8G8B8A8_UNORM, color, 1, slices, true)) ||
             FAILED(d3d12_->create_storage_texture(UINT(kTerrainFaceCacheSlice), UINT(kTerrainFaceCacheSlice), 0, DXGI_FORMAT_R8_UNORM, height, 1, slices, true)))
             return false;
-        for (std::uint32_t s = 0; s < old; ++s)
+        for (std::uint32_t s = 0; s < (std::min)(old, slices); ++s)
             if (FAILED(d3d12_->copy_texture(*color, s, *face_color12_, s)) || FAILED(d3d12_->copy_texture(*height, s, *face_height12_, s))) return false;
         face_color12_ = color; face_height12_ = height;
         add_slots();
@@ -665,7 +672,7 @@ bool Renderer::grow_terrain_face_pool(std::uint32_t slices) noexcept try {
     HRESULT hr = make(DXGI_FORMAT_R8G8B8A8_UNORM, color, color_srv, color_rtvs);
     if (SUCCEEDED(hr)) hr = make(DXGI_FORMAT_R8_UNORM, height, height_srv, height_rtvs);
     if (FAILED(hr)) return false;
-    for (std::uint32_t s = 0; s < old; ++s) {
+    for (std::uint32_t s = 0; s < (std::min)(old, slices); ++s) {
         context_->CopySubresourceRegion(color.Get(), s, 0, 0, 0, face_color_.Get(), s, nullptr);
         context_->CopySubresourceRegion(height.Get(), s, 0, 0, 0, face_height_.Get(), s, nullptr);
     }
@@ -891,7 +898,8 @@ void Renderer::update_terrain_face_cache() noexcept try {
     if (scene_composited_) return;
     const auto& config = debug_overlay_.config();
     const int mode = std::clamp(configured_integer(config, "terrain_face_cache", 1), 0, 2);
-    const bool on = mode > 0 && terrain2_table_count_ > 0 && native_world_clip_valid_ && !face_failed_ && (d3d12_ || feature_level_ >= D3D_FEATURE_LEVEL_11_0);
+    const bool on = mode > 0 && terrain2_table_count_ > 0 && native_world_clip_valid_ && !face_failed_ && !vram_face_cache_dropped() &&
+        (d3d12_ || feature_level_ >= D3D_FEATURE_LEVEL_11_0);
     // Off (or unavailable) frees the atlases (the neighbours' too: their
     // grids stay for the next time it turns on), the tables and the pool.
     if (!on) {
@@ -1112,24 +1120,39 @@ void Renderer::update_terrain_face_cache() noexcept try {
 
     // Slots: free ones first, then the least recently read that no feedback
     // of the last kRetain frames read (the jittered feedback sees a page's
-    // pixels only on some frames); the pool grows by a slice when every slot
-    // was read that recently (the demand: what the view reads).
+    // pixels only on some frames). When every slot was read that recently the
+    // pool grows, to twice its slices, and never shrinks in play; it goes at
+    // the map change, and a map set's first pool is its previous visit's
+    // peak (face_map_peaks_, by the active map; at least kMinSlices) or
+    // kFirstSlices for one not seen yet, so a map entry makes it once
+    // instead of climbing a slice at a time (#289 sizing audit: starting at 1 slice and growing
+    // by a quarter, a 1 -> 8 climb created ~690 MiB and copied ~550, and a
+    // shrink every 300 frames followed by regrowth made 7 reallocations in
+    // 32 s of panning). Under budget pressure (level 1 and up) it does not
+    // grow: the least recently read slot is reused even inside kRetain
+    // (never one taken this frame), and a page that finds no slot this
+    // frame is drawn per pixel.
     constexpr std::uint64_t kRetain = 24;
-    std::vector<std::uint32_t> evictable;
-    std::size_t evict_next = 0;
-    bool evictable_ready = false;
+    constexpr std::uint32_t kFirstSlices = 6, kMinSlices = 4;
+    const auto map_set=[]{const auto source=retained_static_terrain_source_snapshot();return source.map?source.map->map_resource:std::string{};};
     struct Job { std::uint32_t map, level, page, slot; };
     std::vector<Job> jobs;
     std::vector<std::array<std::uint32_t, 2>> table_writes; // table index, value
     const auto entry_of = [&](std::uint32_t map, std::uint32_t level, std::uint32_t page) { return face_maps_[map].pages[level] + page; };
+    std::vector<std::uint32_t> evictable;
+    std::size_t evict_next = 0;
+    bool evictable_ready = false;
     for (const Want& w : wanted) {
         if (face_free_.empty()) {
+            const bool full = vram_budget_.level >= 1 && face_slices_ > 0;
             if (!evictable_ready) {
                 evictable_ready = true;
                 for (std::uint32_t s = 0; s < face_slots_.size(); ++s)
-                    if (face_slots_[s].map != UINT32_MAX && face_slots_[s].used + kRetain < native_frame_index_) evictable.push_back(s);
+                    if (face_slots_[s].map != UINT32_MAX && (full ? face_slots_[s].used < native_frame_index_ :
+                        face_slots_[s].used + kRetain < native_frame_index_)) evictable.push_back(s);
                 std::sort(evictable.begin(), evictable.end(), [&](std::uint32_t a, std::uint32_t b) { return face_slots_[a].used < face_slots_[b].used; });
             }
+            if (full && evict_next >= evictable.size()) break; // every slot was taken this frame: the rest stay per pixel
             if (evict_next < evictable.size()) {
                 const std::uint32_t s = evictable[evict_next++];
                 auto& slot = face_slots_[s];
@@ -1138,14 +1161,22 @@ void Renderer::update_terrain_face_cache() noexcept try {
                 slot = TerrainFaceSlot{}; face_free_.push_back(s);
             } else {
                 const std::uint32_t slices = face_slices_;
-                if (!grow_terrain_face_pool(slices + 1u)) {
+                std::uint32_t target = slices * 2u;
+                if (!slices) {
+                    const auto peak = face_map_peaks_.find(map_set());
+                    target = peak != face_map_peaks_.end() ? (std::max)(kMinSlices, peak->second) : kFirstSlices;
+                }
+                if (!grow_terrain_face_pool(target)) {
                     face_failed_ = true; release_terrain_face_cache();
                     char text[128]; std::snprintf(text, sizeof(text), "page pool could not grow past %u slices; faces stay per pixel", slices);
                     bridge_append_probe_event("terrain_face_cache_omitted", text); bind_terrain_face_cache(); return;
                 }
-                char text[96]; std::snprintf(text, sizeof(text), "slices=%u mb=%.0f maps=%zu", face_slices_,
-                    double(face_slices_) * kTerrainFaceCacheSlice * kTerrainFaceCacheSlice * 5 / 1048576.0, face_maps_.size());
-                bridge_append_probe_event("terrain_face_cache_pool", text);
+                try { auto& peak = face_map_peaks_[map_set()]; peak = (std::max)(peak, face_slices_); } catch (...) {}
+                {   // One line a pool size (at most a few a map now): the growth is visible in every log.
+                    char text[96]; std::snprintf(text, sizeof(text), "slices=%u mb=%.0f maps=%zu", face_slices_,
+                        double(face_slices_) * kTerrainFaceCacheSlice * kTerrainFaceCacheSlice * 5 / 1048576.0, face_maps_.size());
+                    bridge_append_probe_event("terrain_face_cache_pool", text);
+                }
             }
         }
         const std::uint32_t s = face_free_.back(); face_free_.pop_back();

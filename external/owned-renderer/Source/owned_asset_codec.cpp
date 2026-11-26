@@ -188,7 +188,7 @@ void AssetEncoder::body(Out& out, const VisualAssemblyAsset& v) {
         }
     }
     io(out, v.shape); io(out, v.center_shift); io(out, v.scale); io(out, v.envelope_radius);
-    io(out, v.sways); io(out, v.sway_shape); io(out, v.sway_root);
+    io(out, v.sways); io(out, v.sway_shape); io(out, v.sway_root); io(out, v.ground_contact);
     io(out,v.environment_wind);
 }
 void AssetEncoder::body(Out& out, const TerrainCpuAsset& v) {
@@ -339,7 +339,7 @@ bool AssetDecoder::body(In& in, VisualAssemblyAsset& v) {
         if (!in.ok()) return false;
     }
     io(in, v.shape); io(in, v.center_shift); io(in, v.scale); io(in, v.envelope_radius);
-    io(in, v.sways); io(in, v.sway_shape); io(in, v.sway_root);
+    io(in, v.sways); io(in, v.sway_shape); io(in, v.sway_root); io(in, v.ground_contact);
     io(in,v.environment_wind);
     return in.ok();
 }

@@ -34,6 +34,7 @@
 #include "widescreen.h"
 #include "cursor_image.h"
 #include "x64_remote_link.h"
+#include "gpu_adapter.h"
 #include "hud_atlas_mutation.h"
 #include "res_mapping.h"
 #include "owned_ui_layers.h"
@@ -420,7 +421,11 @@ void install_runtime_bridges(){
  // Stock widescreen first; foreign layouts reject visibly. The bridge then
  // chains its native HUD, character-pane and camera hooks above ours.
  {const std::wstring ini=owned::renderer_config_path();owned::WidescreenSettings ws{};
-  ws.hud=static_cast<owned::widescreen::HudWidth>(std::clamp<int>(static_cast<int>(GetPrivateProfileIntW(L"graphics",L"hud_width",2,ini.c_str())),0,2));
+  // Read before migrate_settings runs: an ini saved before settings_version
+  // 12 that holds the old default 2 (16:9 cap) takes the new one, full width.
+  int hud=std::clamp<int>(static_cast<int>(GetPrivateProfileIntW(L"graphics",L"hud_width",0,ini.c_str())),0,2);
+  if(hud==2&&static_cast<int>(GetPrivateProfileIntW(L"setup",L"settings_version",0,ini.c_str()))<12)hud=0;
+  ws.hud=static_cast<owned::widescreen::HudWidth>(hud);
   ws.ui_scale_percent=std::clamp<int>(static_cast<int>(GetPrivateProfileIntW(L"graphics",L"ui_scale",100,ini.c_str())),50,120);
   widescreen_install(owned::game_sites_ok(owned::GameSiteGroup::widescreen),ws);}
  auto& engine=EngineBridge::instance();engine.install();
@@ -590,6 +595,15 @@ void exception_trace_state(HANDLE file,const CONTEXT& context,std::uintptr_t ima
   WriteFile(file,line,(DWORD)used,&written,nullptr);++shown;
  }
 }
+// The stack slots from esp up to this thread's stack base, at most cap: the
+// scans below stop there instead of faulting on the page past the top, which
+// the vectored handler itself then logged as a ddraw.dll access violation.
+int stack_slots_to_base(std::uintptr_t esp,int cap){
+ const auto* tib=reinterpret_cast<const NT_TIB*>(NtCurrentTeb());
+ const std::uintptr_t base=reinterpret_cast<std::uintptr_t>(tib->StackBase);
+ if(esp>=base)return 0;
+ return static_cast<int>((std::min)(static_cast<std::uintptr_t>(cap),(base-esp)/sizeof(std::uintptr_t)));
+}
 // Each line names the faulting module and the offset from its load base
 // (ddraw.dll RVAs match the map at 0x10000000+RVA); the first line of a
 // session records the game and ddraw.dll load bases.
@@ -652,7 +666,8 @@ LONG CALLBACK exception_trace(EXCEPTION_POINTERS* pointers){
    static_cast<unsigned long>(thrower?p2-reinterpret_cast<std::uintptr_t>(thrower):0u),type,
    static_cast<unsigned long>(object[0]),static_cast<unsigned long>(object[1]),static_cast<unsigned long>(object[2]),static_cast<unsigned long>(object[3]));
   const auto* slot=reinterpret_cast<const std::uintptr_t*>(pointers->ContextRecord->Esp);int found=0;
-  for(int i=0;i<4096&&found<24&&used<960;++i){
+  const int depth=stack_slots_to_base(pointers->ContextRecord->Esp,4096);
+  for(int i=0;i<depth&&found<24&&used<960;++i){
    std::uintptr_t value=0;
    __try{value=slot[i];}__except(EXCEPTION_EXECUTE_HANDLER){break;}
    if(value>ddrawBase+0x1000&&value<ddrawEnd){used+=wsprintfA(trace+used," %06lX",static_cast<unsigned long>(value-ddrawBase));++found;}
@@ -667,7 +682,8 @@ LONG CALLBACK exception_trace(EXCEPTION_POINTERS* pointers){
   const std::uintptr_t text_end=image+headers->OptionalHeader.SizeOfImage;
   char trace[1024]{};int used=wsprintfA(trace,"  stack:");int found=0;
   const auto* slot=reinterpret_cast<const std::uintptr_t*>(pointers->ContextRecord->Esp);
-  for(int i=0;i<2048&&found<32&&used<960;++i){
+  const int depth=stack_slots_to_base(pointers->ContextRecord->Esp,2048);
+  for(int i=0;i<depth&&found<32&&used<960;++i){
    std::uintptr_t value=0;
    __try{value=slot[i];}__except(EXCEPTION_EXECUTE_HANDLER){break;}
    if(value>image+0x1000&&value<text_end){used+=wsprintfA(trace+used," %08lX",static_cast<unsigned long>(value-image+0x400000));++found;}
@@ -1440,7 +1456,7 @@ private:
   }catch(...){return false;}
  }
  static bool nativeWorldLighting(void* context,const NativeWorldLighting& lighting) noexcept{try{Device* self=static_cast<Device*>(context);return self&&self->scene_&&self->dd_->renderer.set_native_world_lighting(lighting);}catch(...){return false;}}
- static bool nativePointLights(void* context,const RetainedVisualFrame& frame) noexcept{try{Device* self=static_cast<Device*>(context);if(self&&self->scene_)self->dd_->renderer.set_fire_spells(frame.fire_spells,frame.time);return self&&self->scene_&&self->dd_->renderer.set_native_point_lights(frame.world_point_lights,frame.time);}catch(...){return false;}}
+ static bool nativePointLights(void* context,const RetainedVisualFrame& frame) noexcept{try{Device* self=static_cast<Device*>(context);if(self&&self->scene_){self->dd_->renderer.set_fire_spells(frame.fire_spells,frame.time);self->dd_->renderer.set_interact_overlay(frame.alt_overlay);}return self&&self->scene_&&self->dd_->renderer.set_native_point_lights(frame.world_point_lights,frame.time);}catch(...){return false;}}
  static bool beginNativePointShadowBatch(void* context,std::uint64_t& generation,bool& pressure) noexcept{
   try{Device* self=static_cast<Device*>(context);if(!self||!self->scene_||self->native_batch_active_)return false;
    if(FAILED(self->flushPendingDraws())||FAILED(self->dd_->flushVisualUi()))return false;
@@ -1670,9 +1686,8 @@ private:
     if(!request.world_to_clip){result.failure_hresult=E_INVALIDARG;result.failure_operation="proxy.static_clip";return false;}
     hr=request.terrain?dd_->renderer.flush_native_static_terrain(state_,*request.world_to_clip):
      dd_->renderer.flush_native_static(state_,*request.world_to_clip);
-    if(FAILED(hr)){result.failure_hresult=hr;result.failure_operation="proxy.static_flush";
-     char detail[96];std::snprintf(detail,sizeof(detail),"hr=%08lx draws=%zu",static_cast<unsigned long>(hr),dd_->renderer.native_static_draw_count());
-     owned::bridge_append_probe_event("static_flush_failed",detail);return false;}
+    dd_->renderer.report_static_flush_failure(hr,request.terrain);
+    if(FAILED(hr)){result.failure_hresult=hr;result.failure_operation="proxy.static_flush";return false;}
     return true;
    }
    bool registered=false;
@@ -2040,35 +2055,6 @@ void DD::serviceSceneSurfaceRequests() noexcept{
     }
 }
 
-// Temporary (doll bug, 2026-11-06): which path retires a published surface
-// without a replacement (the per-character mo... atlases after the addon's
-// shared-name cap), once per site and reason.
-thread_local const char* g_visual_reject_reason = nullptr;
-void report_visual_surface_retire(const char* site, const char* reason, const SurfaceImage& image,
-                                  bool current, bool locked, bool dc, bool lost) noexcept {
-    static std::mutex lock;
-    static std::vector<std::string> seen;
-    try {
-        const std::string key = std::string(site) + "/" + (reason ? reason : "-");
-        {
-            std::lock_guard<std::mutex> guard(lock);
-            if (seen.size() >= 32 || std::find(seen.begin(), seen.end(), key) != seen.end()) return;
-            seen.push_back(key);
-        }
-        SYSTEMTIME time{}; GetLocalTime(&time);
-        char detail[320];
-        std::snprintf(detail, sizeof(detail),
-            "time=%02u:%02u:%02u.%03u site=%s reason=%s id=%llu %ux%u bpp=%lu generation=%llu published=%llu "
-            "cpu_current=%d locked=%d dc=%d lost=%d gpu_captured=%d cpu_released=%d cpu_access=%d pixels=%zu",
-            time.wHour, time.wMinute, time.wSecond, time.wMilliseconds, site, reason ? reason : "-",
-            static_cast<unsigned long long>(image.id), image.width, image.height, image.format.dwRGBBitCount,
-            static_cast<unsigned long long>(image.generation), static_cast<unsigned long long>(image.published_generation),
-            current ? 1 : 0, locked ? 1 : 0, dc ? 1 : 0, lost ? 1 : 0, image.gpu_captured ? 1 : 0,
-            image.cpu_released ? 1 : 0, image.cpu_access_active ? 1 : 0, image.pixels.size());
-        owned::bridge_append_probe_event("visual_surface_retired", detail);
-    } catch (...) {}
-}
-
 bool Surface::completedVisualValue(std::shared_ptr<const OwnedVisualSurface>& value) noexcept {
     // Keep an existing publication alive while replacing the caller's reference.
     auto cached = retained_visual_surface_value(image_.id, image_.generation);
@@ -2077,8 +2063,7 @@ bool Surface::completedVisualValue(std::shared_ptr<const OwnedVisualSurface>& va
     // Establish this source role before any upload can discard its bytes.
     // A generation whose publication fails no longer holds its bytes for it.
     image_.visual_source = true;
-    const auto reject = [this](const char* why) noexcept {
-        g_visual_reject_reason = why;
+    const auto reject = [this](const char*) noexcept {
         image_.visual_source = false; held_publication_.reset(); return false; };
     if (!visualCpuCurrent()) return reject("cpu_not_current");
     value = std::move(cached);
@@ -2122,7 +2107,6 @@ bool Surface::completedVisualValue(std::shared_ptr<const OwnedVisualSurface>& va
     description.static_mip_hint = image_.static_mip_hint;
     image_.mip_source_used = true;
     if (!retained_visual_complete_surface(description, std::as_const(image_.pixels).data(), image_.pixels.size(), value)) {
-        report_visual_surface_retire("publish", "complete_failed", image_, visual_cpu_current_, locked_, dc_active_, lost_);
         retained_visual_retire_surface(image_.id);
         return reject("complete_failed");
     }
@@ -2139,9 +2123,7 @@ void Surface::completedVisualMutation() noexcept {
     PostEngineSurfaceTimingScope timing(
         PostEngineSurfaceTimingKind::completed_surface);
     std::shared_ptr<const OwnedVisualSurface> next;
-    g_visual_reject_reason = nullptr;
     if (!completedVisualValue(next)) {
-        report_visual_surface_retire("mutation", g_visual_reject_reason, image_, visual_cpu_current_, locked_, dc_active_, lost_);
         retained_visual_retire_surface(image_.id);
     }
     timing.finish(image_.pixels.size());
@@ -2161,7 +2143,6 @@ void Surface::invalidateVisualCpu() noexcept {
     if (visual_source_observed_) {
         PostEngineSurfaceTimingScope timing(
             PostEngineSurfaceTimingKind::completed_surface);
-        report_visual_surface_retire("invalidate_cpu", nullptr, image_, false, locked_, dc_active_, lost_);
         retained_visual_retire_surface(image_.id);
         timing.finish(image_.pixels.size());
     }
@@ -2549,7 +2530,27 @@ static HRESULT copy_rect(Surface& dst,LONG dx,LONG dy,Surface& src,const RECT* s
 static HRESULT stretch_rect(Surface& dst,const RECT& dr,Surface& src,const RECT& sr,bool publish_visual=true){
  const LONG dw=dr.right-dr.left,dh=dr.bottom-dr.top,sw=sr.right-sr.left,sh=sr.bottom-sr.top;if(dw<=0||dh<=0||sw<=0||sh<=0)return DDERR_INVALIDRECT;
  if(block_compressed(dst.image()->format)||block_compressed(src.image()->format))return DDERR_INVALIDPIXELFORMAT;
- HRESULT hr=dst.ensurePixels();if(FAILED(hr))return hr;hr=src.restoreReleased(false);if(FAILED(hr))return hr;hr=src.legacyCpuAccess();if(FAILED(hr))return hr;
+ HRESULT hr=dst.ensurePixels();if(FAILED(hr))return hr;
+ // A save picture (#342): the game's CI3DSurface::Stretch shrinks its whole
+ // screen capture (GPU home, no current CPU pixels) into a small surface
+ // (QuickSave, autosave, the modal backdrop in core mode). Scaled on the GPU
+ // and only the small picture read back, never the full-resolution frame.
+ // A failure is named once and takes the full readback below.
+ if(src.image()->gpu_captured&&!src.visualCpuCurrent()&&sr.left==0&&sr.top==0&&sr.right==(LONG)src.image()->width&&
+    sr.bottom==(LONG)src.image()->height&&dw<sw&&dh<sh&&dr.left>=0&&dr.top>=0&&dr.right<=(LONG)dst.image()->width&&
+    dr.bottom<=(LONG)dst.image()->height){
+  const HRESULT scaled=dst.owner()->renderer.read_scaled_capture(*src.image(),*dst.image(),dr);
+  if(scaled==S_OK){
+   dst.image()->gpu_captured=false;mark_surface_dirty(*dst.image(),dr);advance_surface_generation(*dst.image(),&dr);
+   if(publish_visual)dst.completedVisualCpuWrite(dr.left==0&&dr.top==0&&dr.right==(LONG)dst.image()->width&&dr.bottom==(LONG)dst.image()->height,true);
+   else dst.invalidateVisualCpu();
+   return DD_OK;
+  }
+  static bool reported=false;
+  if(!reported){reported=true;char text[160];std::snprintf(text,sizeof(text),"hr=%08lx source=%ux%u picture=%ldx%ld; this picture reads the whole capture back",
+   static_cast<unsigned long>(scaled),src.image()->width,src.image()->height,dw,dh);bridge_report_event("save_picture_gpu_scale_failed",text);}
+ }
+ hr=src.restoreReleased(false);if(FAILED(hr))return hr;hr=src.legacyCpuAccess();if(FAILED(hr))return hr;
  const DWORD db=pixel_bytes(dst.image()->format),sb=pixel_bytes(src.image()->format);if(db!=sb)return DDERR_INVALIDPIXELFORMAT;
  const RECT clipped{std::max<LONG>(0,dr.left),std::max<LONG>(0,dr.top),std::min<LONG>((LONG)dst.image()->width,dr.right),std::min<LONG>((LONG)dst.image()->height,dr.bottom)};if(clipped.right<=clipped.left||clipped.bottom<=clipped.top)return DD_OK;
  PostEngineSurfaceTimingScope timing(PostEngineSurfaceTimingKind::cpu_rect);for(LONG y=clipped.top;y<clipped.bottom;++y)for(LONG x=clipped.left;x<clipped.right;++x){const POINT source=capture_stretch_source_point(sr,dr,x,y);if(source.x<0||source.y<0||source.x>=(LONG)src.image()->width||source.y>=(LONG)src.image()->height)continue;std::memcpy(dst.image()->pixels.data()+(size_t)y*dst.image()->pitch+(size_t)x*db,std::as_const(src.image()->pixels).data()+(size_t)source.y*src.image()->pitch+(size_t)source.x*sb,db);}
@@ -2769,13 +2770,76 @@ std::atomic<bool> g_ddraw_enumerate_called{false};
 void note_ddraw_create() noexcept {
  if(!g_ddraw_create_called.exchange(true))bridge_verify_renderer_ownership("startup");
 }
+
+// Issue #290: the renderer needs D3D feature level 11_0 and has no world path
+// below it. Such a GPU gets one warning, then every export forwards to the
+// system ddraw.dll and no hook is installed: the original game, visibly not
+// ours, instead of an empty frame. DllMain patches nothing, so the decision on
+// the first export call precedes every game patch.
+std::atomic<bool> g_ddraw_bypass_active{false};
+HMODULE g_system_ddraw=nullptr;
+
+bool ddraw_bypass() noexcept {
+ static const bool bypass=[]{
+  // A null device pointer only checks support: no device is created.
+  const D3D_FEATURE_LEVEL levels[]={D3D_FEATURE_LEVEL_11_0,D3D_FEATURE_LEVEL_10_1,D3D_FEATURE_LEVEL_10_0,
+   D3D_FEATURE_LEVEL_9_3,D3D_FEATURE_LEVEL_9_2,D3D_FEATURE_LEVEL_9_1};
+  D3D_FEATURE_LEVEL level{};
+  // The adapter the renderer's devices use (Source/gpu_adapter.h): on a
+  // hybrid laptop the discrete GPU, not the integrated adapter 0.
+  const gpu_adapter::Choice gpu=gpu_adapter::choose();
+  const HRESULT hr=D3D11CreateDevice(gpu.adapter.Get(),gpu.adapter?D3D_DRIVER_TYPE_UNKNOWN:D3D_DRIVER_TYPE_HARDWARE,nullptr,D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+   levels,ARRAYSIZE(levels),D3D11_SDK_VERSION,nullptr,&level,nullptr);
+  if(SUCCEEDED(hr)&&level>=D3D_FEATURE_LEVEL_11_0)return false;
+  // The dinput crash guard changes game behaviour; the bypass keeps none of ours.
+  if(dinput_guard::g_handler){RemoveVectoredExceptionHandler(dinput_guard::g_handler);dinput_guard::g_handler=nullptr;}
+  wchar_t path[MAX_PATH]{};const UINT length=GetSystemDirectoryW(path,MAX_PATH);
+  if(length&&length<MAX_PATH-16&&wcscat_s(path,L"\\ddraw.dll")==0)g_system_ddraw=LoadLibraryW(path);
+  char detail[128];
+  std::snprintf(detail,sizeof(detail),"probe_hr=%08lx feature_level=%x system_ddraw=%s",static_cast<unsigned long>(hr),
+   SUCCEEDED(hr)?static_cast<unsigned>(level):0u,g_system_ddraw?"loaded":"missing");
+  bridge_report_event("unsupported_gpu_bypass",detail);
+  wchar_t found[64];
+  if(SUCCEEDED(hr))swprintf_s(found,L"feature level %u_%u",static_cast<unsigned>(level)>>12,(static_cast<unsigned>(level)>>8)&0xFu);
+  else swprintf_s(found,L"no Direct3D 11 device (%08lx)",static_cast<unsigned long>(hr));
+  wchar_t text[1536];
+  swprintf_s(text,
+   L"Unsupported graphics card: this GPU or its driver offers %s, and the EID3D11 renderer needs DirectX "
+   L"feature level 11_0. The renderer is switched off; the game runs with its original graphics.%s\n\n"
+   L"Updating the graphics driver may help.\n\n"
+   L"\u0412\u0438\u0434\u0435\u043e\u043a\u0430\u0440\u0442\u0430 \u0438\u043b\u0438 \u0435\u0451 \u0434\u0440\u0430\u0439\u0432\u0435\u0440 "
+   L"\u043d\u0435 \u043f\u043e\u0434\u0434\u0435\u0440\u0436\u0438\u0432\u0430\u0435\u0442 DirectX feature level 11_0, "
+   L"\u043a\u043e\u0442\u043e\u0440\u044b\u0439 \u043d\u0443\u0436\u0435\u043d \u0440\u0435\u043d\u0434\u0435\u0440\u0435\u0440\u0443 EID3D11. "
+   L"\u0420\u0435\u043d\u0434\u0435\u0440\u0435\u0440 \u043e\u0442\u043a\u043b\u044e\u0447\u0451\u043d, "
+   L"\u0438\u0433\u0440\u0430 \u0437\u0430\u043f\u0443\u0449\u0435\u043d\u0430 \u0441 "
+   L"\u043e\u0440\u0438\u0433\u0438\u043d\u0430\u043b\u044c\u043d\u043e\u0439 \u0433\u0440\u0430\u0444\u0438\u043a\u043e\u0439. "
+   L"\u041e\u0431\u043d\u043e\u0432\u043b\u0435\u043d\u0438\u0435 \u0434\u0440\u0430\u0439\u0432\u0435\u0440\u0430 "
+   L"\u0432\u0438\u0434\u0435\u043e\u043a\u0430\u0440\u0442\u044b \u043c\u043e\u0436\u0435\u0442 \u043f\u043e\u043c\u043e\u0447\u044c.",
+   found,g_system_ddraw?L"":L"\n\nThe system ddraw.dll could not be loaded either, so the game cannot start.");
+  MessageBoxW(nullptr,text,L"Evil Islands",MB_OK|MB_ICONWARNING|MB_TOPMOST|MB_SETFOREGROUND);
+  g_ddraw_bypass_active.store(true);
+  return true;
+ }();
+ return bypass;
+}
+
+template<class F> F system_ddraw_export(const char* name) noexcept {
+ return g_system_ddraw?reinterpret_cast<F>(GetProcAddress(g_system_ddraw,name)):nullptr;
+}
 } // namespace owned
+
+// Bypass forwarding: call the system export with the same arguments, or fail
+// visibly when the system ddraw.dll or that export is unavailable.
+#define EID3D11_FORWARD(name,type,fail,...) \
+ if(owned::ddraw_bypass()){const auto f=owned::system_ddraw_export<type>(#name);return f?f(__VA_ARGS__):fail;}
+#define EID3D11_FORWARD_VOID(name) \
+ if(owned::ddraw_bypass()){if(const auto f=owned::system_ddraw_export<void(WINAPI*)()>(#name))f();return;}
 
 using owned::DD;
 
-extern "C" HRESULT WINAPI DirectDrawCreateEx(GUID*,void** out,REFIID iid,IUnknown* outer){owned::enable_application_dpi_awareness();owned::install_runtime_bridges();owned::note_ddraw_create();owned::apply_initial_game_back_clip();owned::trace("Export.DirectDrawCreateEx");if(!out||outer)return DDERR_INVALIDPARAMS;*out=nullptr;auto* dd=new(std::nothrow)DD();if(!dd)return DDERR_OUTOFMEMORY;HRESULT hr=dd->QueryInterface(iid,out);dd->Release();return hr;}
-extern "C" HRESULT WINAPI DirectDrawCreate(GUID*,LPDIRECTDRAW* out,IUnknown* outer){owned::enable_application_dpi_awareness();owned::install_runtime_bridges();owned::note_ddraw_create();owned::apply_initial_game_back_clip();owned::trace("Export.DirectDrawCreate");if(!out||outer)return DDERR_INVALIDPARAMS;*out=nullptr;auto* core=new(std::nothrow)DD();if(!core)return DDERR_OUTOFMEMORY;auto* legacy=new(std::nothrow)owned::LegacyDD(core);if(!legacy){core->Release();return DDERR_OUTOFMEMORY;}*out=static_cast<IDirectDraw*>(legacy);return DD_OK;}
-extern "C" HRESULT WINAPI DirectDrawCreateClipper(DWORD,LPDIRECTDRAWCLIPPER*,IUnknown*){owned::trace("Export.DirectDrawCreateClipper");return DDERR_UNSUPPORTED;}
+extern "C" HRESULT WINAPI DirectDrawCreateEx(GUID* guid,void** out,REFIID iid,IUnknown* outer){EID3D11_FORWARD(DirectDrawCreateEx,HRESULT(WINAPI*)(GUID*,void**,REFIID,IUnknown*),DDERR_GENERIC,guid,out,iid,outer)owned::enable_application_dpi_awareness();owned::install_runtime_bridges();owned::note_ddraw_create();owned::apply_initial_game_back_clip();owned::trace("Export.DirectDrawCreateEx");if(!out||outer)return DDERR_INVALIDPARAMS;*out=nullptr;auto* dd=new(std::nothrow)DD();if(!dd)return DDERR_OUTOFMEMORY;HRESULT hr=dd->QueryInterface(iid,out);dd->Release();return hr;}
+extern "C" HRESULT WINAPI DirectDrawCreate(GUID* guid,LPDIRECTDRAW* out,IUnknown* outer){EID3D11_FORWARD(DirectDrawCreate,HRESULT(WINAPI*)(GUID*,LPDIRECTDRAW*,IUnknown*),DDERR_GENERIC,guid,out,outer)owned::enable_application_dpi_awareness();owned::install_runtime_bridges();owned::note_ddraw_create();owned::apply_initial_game_back_clip();owned::trace("Export.DirectDrawCreate");if(!out||outer)return DDERR_INVALIDPARAMS;*out=nullptr;auto* core=new(std::nothrow)DD();if(!core)return DDERR_OUTOFMEMORY;auto* legacy=new(std::nothrow)owned::LegacyDD(core);if(!legacy){core->Release();return DDERR_OUTOFMEMORY;}*out=static_cast<IDirectDraw*>(legacy);return DD_OK;}
+extern "C" HRESULT WINAPI DirectDrawCreateClipper(DWORD flags,LPDIRECTDRAWCLIPPER* out,IUnknown* outer){EID3D11_FORWARD(DirectDrawCreateClipper,HRESULT(WINAPI*)(DWORD,LPDIRECTDRAWCLIPPER*,IUnknown*),DDERR_GENERIC,flags,out,outer)owned::trace("Export.DirectDrawCreateClipper");return DDERR_UNSUPPORTED;}
 namespace owned {
 // The game picks its DirectDraw driver by the registry index DrawingTarget
 // (General Settings under its own registry root; device init looks that entry
@@ -2800,17 +2864,17 @@ unsigned driver_entries() noexcept {
  return count;
 }
 }
-extern "C" HRESULT WINAPI DirectDrawEnumerateExA(LPDDENUMCALLBACKEXA cb,LPVOID c,DWORD){owned::trace("Export.DirectDrawEnumerateExA");if(!owned::g_ddraw_enumerate_called.exchange(true))owned::bridge_log_ddraw_imports("first_enumerate");if(!cb)return DDERR_INVALIDPARAMS;char desc[]="Owned D3D11 renderer";char name[]="owned-d3d11";const unsigned n=owned::driver_entries();for(unsigned i=0;i<n;++i){GUID id=owned::kDriverAliases[i];if(!cb(i?&id:nullptr,desc,name,c,nullptr))break;}return DD_OK;}
-extern "C" HRESULT WINAPI DirectDrawEnumerateA(LPDDENUMCALLBACKA cb,LPVOID c){owned::trace("Export.DirectDrawEnumerateA");if(!cb)return DDERR_INVALIDPARAMS;char desc[]="Owned D3D11 renderer";char name[]="owned-d3d11";const unsigned n=owned::driver_entries();for(unsigned i=0;i<n;++i){GUID id=owned::kDriverAliases[i];if(!cb(i?&id:nullptr,desc,name,c))break;}return DD_OK;}
-extern "C" HRESULT WINAPI DirectDrawEnumerateW(LPDDENUMCALLBACKW,LPVOID){return DDERR_UNSUPPORTED;}
-extern "C" HRESULT WINAPI DirectDrawEnumerateExW(LPDDENUMCALLBACKEXW,LPVOID,DWORD){return DDERR_UNSUPPORTED;}
-extern "C" void WINAPI AcquireDDThreadLock(){}
-extern "C" void WINAPI ReleaseDDThreadLock(){}
+extern "C" HRESULT WINAPI DirectDrawEnumerateExA(LPDDENUMCALLBACKEXA cb,LPVOID c,DWORD flags){EID3D11_FORWARD(DirectDrawEnumerateExA,HRESULT(WINAPI*)(LPDDENUMCALLBACKEXA,LPVOID,DWORD),DDERR_GENERIC,cb,c,flags)owned::trace("Export.DirectDrawEnumerateExA");if(!owned::g_ddraw_enumerate_called.exchange(true))owned::bridge_log_ddraw_imports("first_enumerate");if(!cb)return DDERR_INVALIDPARAMS;char desc[]="Owned D3D11 renderer";char name[]="owned-d3d11";const unsigned n=owned::driver_entries();for(unsigned i=0;i<n;++i){GUID id=owned::kDriverAliases[i];if(!cb(i?&id:nullptr,desc,name,c,nullptr))break;}return DD_OK;}
+extern "C" HRESULT WINAPI DirectDrawEnumerateA(LPDDENUMCALLBACKA cb,LPVOID c){EID3D11_FORWARD(DirectDrawEnumerateA,HRESULT(WINAPI*)(LPDDENUMCALLBACKA,LPVOID),DDERR_GENERIC,cb,c)owned::trace("Export.DirectDrawEnumerateA");if(!cb)return DDERR_INVALIDPARAMS;char desc[]="Owned D3D11 renderer";char name[]="owned-d3d11";const unsigned n=owned::driver_entries();for(unsigned i=0;i<n;++i){GUID id=owned::kDriverAliases[i];if(!cb(i?&id:nullptr,desc,name,c))break;}return DD_OK;}
+extern "C" HRESULT WINAPI DirectDrawEnumerateW(LPDDENUMCALLBACKW cb,LPVOID c){EID3D11_FORWARD(DirectDrawEnumerateW,HRESULT(WINAPI*)(LPDDENUMCALLBACKW,LPVOID),DDERR_GENERIC,cb,c)return DDERR_UNSUPPORTED;}
+extern "C" HRESULT WINAPI DirectDrawEnumerateExW(LPDDENUMCALLBACKEXW cb,LPVOID c,DWORD flags){EID3D11_FORWARD(DirectDrawEnumerateExW,HRESULT(WINAPI*)(LPDDENUMCALLBACKEXW,LPVOID,DWORD),DDERR_GENERIC,cb,c,flags)return DDERR_UNSUPPORTED;}
+extern "C" void WINAPI AcquireDDThreadLock(){EID3D11_FORWARD_VOID(AcquireDDThreadLock)}
+extern "C" void WINAPI ReleaseDDThreadLock(){EID3D11_FORWARD_VOID(ReleaseDDThreadLock)}
 extern "C" HRESULT WINAPI CompleteCreateSysmemSurface(){return E_NOTIMPL;}
 extern "C" HRESULT WINAPI D3DParseUnknownCommand(){return E_NOTIMPL;}
 extern "C" HRESULT WINAPI DDInternalLock(){return E_NOTIMPL;}
 extern "C" HRESULT WINAPI DDInternalUnlock(){return E_NOTIMPL;}
-extern "C" HRESULT WINAPI DllCanUnloadNow(){return S_FALSE;}
-extern "C" HRESULT WINAPI DllGetClassObject(REFCLSID,REFIID,LPVOID*){return CLASS_E_CLASSNOTAVAILABLE;}
-BOOL WINAPI DllMain(HINSTANCE h,DWORD reason,LPVOID reserved){if(reason==DLL_PROCESS_ATTACH){owned::g_module=h;DisableThreadLibraryCalls(h);owned::g_exception_handler=AddVectoredExceptionHandler(1,owned::exception_trace);owned::dinput_guard::g_handler=AddVectoredExceptionHandler(1,owned::dinput_guard::on_exception);std::set_terminate(owned::terminate_trace);_set_purecall_handler(owned::purecall_trace);owned::bridge_log_ddraw_imports("dll_attach");}else if(reason==DLL_PROCESS_DETACH){owned::bridge_async_drain();/* the log writer's queued lines */if(!owned::g_ddraw_create_called.load())owned::bridge_log_never_called_at_exit();if(!reserved){owned::stall_watchdog::stop();owned::ui_layers_uninstall();owned::uninstall_res_mapping_hooks();if(owned::uninstall_game_focus()&&owned::EngineBridge::instance().uninstall())owned::widescreen_uninstall();}if(owned::dinput_guard::g_handler){RemoveVectoredExceptionHandler(owned::dinput_guard::g_handler);owned::dinput_guard::g_handler=nullptr;}if(owned::g_exception_handler){RemoveVectoredExceptionHandler(owned::g_exception_handler);owned::g_exception_handler=nullptr;}}return TRUE;}
+extern "C" HRESULT WINAPI DllCanUnloadNow(){EID3D11_FORWARD(DllCanUnloadNow,HRESULT(WINAPI*)(),S_FALSE)return S_FALSE;}
+extern "C" HRESULT WINAPI DllGetClassObject(REFCLSID clsid,REFIID iid,LPVOID* out){EID3D11_FORWARD(DllGetClassObject,HRESULT(WINAPI*)(REFCLSID,REFIID,LPVOID*),CLASS_E_CLASSNOTAVAILABLE,clsid,iid,out)return CLASS_E_CLASSNOTAVAILABLE;}
+BOOL WINAPI DllMain(HINSTANCE h,DWORD reason,LPVOID reserved){if(reason==DLL_PROCESS_ATTACH){owned::g_module=h;DisableThreadLibraryCalls(h);owned::g_exception_handler=AddVectoredExceptionHandler(1,owned::exception_trace);owned::dinput_guard::g_handler=AddVectoredExceptionHandler(1,owned::dinput_guard::on_exception);std::set_terminate(owned::terminate_trace);_set_purecall_handler(owned::purecall_trace);owned::bridge_log_ddraw_imports("dll_attach");}else if(reason==DLL_PROCESS_DETACH){owned::bridge_async_drain();/* the log writer's queued lines */const bool bypass=owned::g_ddraw_bypass_active.load();if(!bypass&&!owned::g_ddraw_create_called.load())owned::bridge_log_never_called_at_exit();if(!reserved&&!bypass){owned::stall_watchdog::stop();owned::ui_layers_uninstall();owned::uninstall_res_mapping_hooks();if(owned::uninstall_game_focus()&&owned::EngineBridge::instance().uninstall())owned::widescreen_uninstall();}if(owned::dinput_guard::g_handler){RemoveVectoredExceptionHandler(owned::dinput_guard::g_handler);owned::dinput_guard::g_handler=nullptr;}if(owned::g_exception_handler){RemoveVectoredExceptionHandler(owned::g_exception_handler);owned::g_exception_handler=nullptr;}}return TRUE;}
 namespace owned { void window_sampler_present(){ window_sampler::present(); } } // TEMPORARY

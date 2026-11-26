@@ -24,6 +24,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -314,15 +315,38 @@ void reject_owned_visual(const char* stage, const char* reason,
 }
 
 namespace {
-volatile LONG g_object_plan_failure_reported = 0;
+// Each failing stage is named once per world epoch. A once-per-process line
+// (fired at the main menu) hid the stage that later dropped a whole map's
+// world to the per-figure path, which D3D12 omits (tester package
+// 2026-11-20, zone3obr). Stage texts are copied: some are stack buffers.
+std::mutex g_object_plan_failure_lock;
+std::uint64_t g_object_plan_failure_epoch = ~0ull;
+std::array<std::array<char, 96>, 16> g_object_plan_failure_stages{};
+std::size_t g_object_plan_failure_count = 0;
 } // namespace
 void report_object_plan_failure(const char* stage) noexcept {
 #ifdef EID3D11_EMBEDDED
     embedded_report_render_failure("object_render_plan_failure", stage);
 #else
-    if (InterlockedCompareExchange(&g_object_plan_failure_reported, 1, 0) == 0)
-        append_bridge_event("object_render_plan_first_failure",
-                            stage ? stage : "unknown", true);
+    if (!stage) stage = "unknown";
+    const std::uint64_t epoch = bridge_current_world_epoch();
+    {
+        std::lock_guard<std::mutex> guard(g_object_plan_failure_lock);
+        if (epoch != g_object_plan_failure_epoch) {
+            g_object_plan_failure_epoch = epoch;
+            g_object_plan_failure_count = 0;
+        }
+        for (std::size_t i = 0; i < g_object_plan_failure_count; ++i)
+            if (std::strncmp(g_object_plan_failure_stages[i].data(), stage,
+                             g_object_plan_failure_stages[i].size() - 1) == 0) return;
+        if (g_object_plan_failure_count == g_object_plan_failure_stages.size()) return;
+        auto& slot = g_object_plan_failure_stages[g_object_plan_failure_count++];
+        _snprintf_s(slot.data(), slot.size(), _TRUNCATE, "%s", stage);
+    }
+    char detail[192];
+    _snprintf_s(detail, sizeof(detail), _TRUNCATE, "world_epoch=%llu stage=%s",
+                static_cast<unsigned long long>(epoch), stage);
+    append_bridge_event("object_render_plan_failure", detail, true);
 #endif
 }
 
@@ -341,10 +365,14 @@ bool load_reveal_held() noexcept {
         epoch != g_load_reveal_revealed_epoch.load(std::memory_order_relaxed);
 }
 
+// World Draw entries since the renderer last reported its reveal state (each
+// present does); the load pause lets go when the renderer stops reporting.
+std::atomic<unsigned> g_load_reveal_unreported_draws{0};
 #if !defined(EID3D11_EMBEDDED)
 void bridge_set_load_reveal(bool enabled, std::uint64_t revealed_epoch) noexcept {
     g_load_reveal_enabled.store(enabled, std::memory_order_relaxed);
     g_load_reveal_revealed_epoch.store(revealed_epoch, std::memory_order_relaxed);
+    g_load_reveal_unreported_draws.store(0, std::memory_order_relaxed);
 }
 
 #endif // !EID3D11_EMBEDDED
@@ -938,11 +966,80 @@ bool bridge_neighbour_world_transform(std::array<float,16>& placement) noexcept 
 
 #endif // !EID3D11_EMBEDDED
 std::shared_ptr<const VisualAssemblyAsset> build_owned_portrait_bare_assembly(
-    const VisualAssemblyAsset& unit, const OwnedPortraitModel& model, std::int32_t hair,
-    const char*& reason) noexcept {
+    const VisualAssemblyAsset& unit, const OwnedPortraitModel& model, const OwnedPortraitTexture& texture,
+    std::int32_t hair, const char*& reason) noexcept {
     try {
         if (!unit.skeleton) { reason = "bare_head_skeleton"; return nullptr; }
         ResourceFailure failure;
+        // The bare hair samples the hero's own base skin, not the composed
+        // equipment atlas (#279): with a helmet on the game never shows the
+        // atlas' hair strip, and equipment layers reuse it (Nala's iron plate
+        // and legs cover 38% and 28% of hr.01's texels: rusty rings and grey
+        // plate on her portrait hair). The base skin is the atlas' own
+        // composition layer <model>skin_NN (the material classes' skin layer).
+        // An atlas without a known skin layer keeps the atlas (logged once).
+        const auto base_skin = [&](const VisualPartAsset& donor, VisualPartAsset& part) {
+            static std::mutex reported_lock;
+            static std::unordered_map<std::string, bool> reported;
+            const auto report = [&](const char* why) {
+                std::lock_guard<std::mutex> guard(reported_lock);
+                if (!reported.emplace(donor.material_name, true).second) return;
+                char detail[200];
+                std::snprintf(detail, sizeof(detail), "atlas %s: %s; the bare hair keeps the atlas",
+                              donor.material_name.c_str(), why);
+                append_bridge_event("owned_portrait_bare_skin_missing", detail, true);
+            };
+            MaterialComposition composition;
+            if (donor.material_name.empty() || !retained_visual_scene().material_composition(donor.material_name, composition)) {
+                report("no composition"); return;
+            }
+            const auto layer = std::find_if(composition.layers.begin(), composition.layers.end(), [](const std::string& name) {
+                std::string lower(name);
+                std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+                return lower.find("skin_") != std::string::npos;
+            });
+            if (layer == composition.layers.end()) { report("no skin layer in its composition"); return; }
+            // One texture per skin for the session, with its own identity.
+            // As an archive member the skin (PNT3, uncompressed) would key the
+            // GPU texture cache as identity 1 like every uncompressed archive
+            // texture: two heroes' skins shared one texture and one backing,
+            // and each frame renamed that backing's material profile between
+            // their atlases, rebuilding both composed profiles about 35 times
+            // a second (laptop job 090, save1193).
+            static std::mutex skins_lock;
+            static std::unordered_map<std::string, std::shared_ptr<const TextureCpuAsset>> skins;
+            std::shared_ptr<const TextureCpuAsset> skin;
+            {
+                std::lock_guard<std::mutex> guard(skins_lock);
+                auto& cached = skins[*layer];
+                if (!cached) {
+                    ResourceBlob blob;
+                    auto loaded = std::make_shared<TextureCpuAsset>();
+                    if (texture && texture(*layer, blob) && parse_texture_asset(blob, *loaded, failure) && !loaded->mips.empty()) {
+                        static std::uint64_t serial = 0;
+                        loaded->value_source = TextureValueSource::generated_memory;
+                        loaded->value_serial = 0x7e00000000000000ull | ++serial;   // beside portrait_expression's 0x7f
+                        cached = std::move(loaded);
+                    }
+                }
+                skin = cached;
+            }
+            if (!skin) { report("its skin layer did not load"); return; }
+            part.texture = std::move(skin); part.surface.reset();
+            part.texture_source_name = *layer;
+            // No material profile: the atlas' composed profile is laid out for
+            // the atlas (armour classes over the hair strip), not this skin.
+            part.material_name.clear();
+            {
+                std::lock_guard<std::mutex> guard(reported_lock);
+                if (reported.emplace(donor.material_name, true).second) {
+                    char detail[200];
+                    std::snprintf(detail, sizeof(detail), "atlas %s: bare hair %s samples %s", donor.material_name.c_str(),
+                                  part.name.c_str(), layer->c_str());
+                    append_bridge_event("owned_portrait_bare_skin", detail, false);
+                }
+            }
+        };
         // Bare figures by model and part name, kept for the session (a few
         // head and hair figures per hero). The laptop's host rebuilt the bare
         // head about every 12 s with nothing changed (50-68 ms on the replay
@@ -1022,6 +1119,7 @@ std::shared_ptr<const VisualAssemblyAsset> build_owned_portrait_bare_assembly(
             part.material_name = donor->material_name; part.surface = donor->surface;
             part.source_available = donor->source_available;
             part.explicitly_hidden = geometry->indices.empty();
+            if (fur_hair_stem(stem)) base_skin(*donor, part);
         }
         if (hair >= 0) {
             const auto existing = std::find_if(bare->parts.begin(), bare->parts.end(),
@@ -1057,6 +1155,7 @@ std::shared_ptr<const VisualAssemblyAsset> build_owned_portrait_bare_assembly(
                 part.name = hair_name;
                 part.geometry = std::move(geometry);
                 part.skeleton_node = node;
+                base_skin(*donor, part);
                 bare->parts.push_back(std::move(part));
             }
         }

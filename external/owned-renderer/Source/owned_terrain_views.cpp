@@ -64,9 +64,15 @@ bool source_terrain_view(const OwnedTerrainFramePacket& packet,
         static_cast<std::uint32_t>(dynamic.animation_phases.size());
     view.terrain_animation_phases = dynamic.animation_phases.empty()
         ? nullptr : dynamic.animation_phases.data();
-    if (command.material < packet.source->pages.size() &&
-        packet.source->pages[command.material].mip_count > 1) {
-        view.terrain_page = &packet.source->pages[command.material];
+    // An upper or liquid material (texture_count + 2 and above) binds the
+    // same game surface as its base material (submit_source_owned_terrain_commands
+    // binds texture_handles[material % (texture_count + 2)]), so it carries
+    // that page too. Without it, an upper draw that reaches a surface first
+    // records the page with one level, and the contact atlas refuses it (#272).
+    const std::uint32_t page = command.material % (packet.source->texture_count + 2u);
+    if (page < packet.source->pages.size() &&
+        packet.source->pages[page].mip_count > 1) {
+        view.terrain_page = &packet.source->pages[page];
     }
     view.terrain_page_count = packet.source->texture_count + 2u;
     view.decode_context = &context;

@@ -46,9 +46,9 @@ float gcWindSway(float2 p,float2 direction,float seconds,float travel,float gust
 // patch lattice. A lattice cell holds at most one patch, kept wholly inside
 // the cell; cells divide the 4 m placement cell, so a candidate moved into
 // its cell's patch never leaves its placement cell's culling bounds.
-// Kind 1 flowers, 2 snow grass, 3 desert plants: x cell metres, yz radius,
-// w presence. Desert presence/species are selected once by gcCellClump.
-float4 gcClusterShape(uint kind){return kind==1u?float4(4,.9,1.5,.25):kind==2u?float4(2,.16,.3,.25):float4(4,.8,1.05,1);}
+// Kind 1 flower patches, 2 snow-grass clumps: x cell metres, yz patch radius
+// range, w base presence (fraction of cells with a patch).
+float4 gcClusterShape(uint kind){return kind==1u?float4(4,.9,1.5,.25):float4(2,.16,.3,.25);}
 // Shore kelp clumps (ground_cover.h kelp_shore_clump): candidates are kept,
 // not moved, inside the patch of their lattice cell.
 float4 gcKelpShape(){return float4(4,.6,1.6,.7);}
@@ -64,14 +64,6 @@ GcPatch gcPatchAt(float2 p,float cell,float2 radius,uint seed){
  o.centre=float2(c)*cell+margin+float2((h>>8)&255u,(h>>16)&255u)/255.0*max(cell-2*margin,0);
  o.chance=(h>>24)/256.0; // the patch exists where chance < its presence
  return o;
-}
-GcPatch gcClusterPatch(float2 p,uint kind){
- const float4 shape=gcClusterShape(kind);
- GcPatch pc=gcPatchAt(p,shape.x,shape.yz,kind*0x9e3779b9u);
- // Desert clumps in adjacent selected cells still leave open ground
- // between their roots: keep centre jitter inside the middle of the cell.
- if(kind==3u)pc.centre=lerp((floor(p/shape.x)+.5)*shape.x,pc.centre,.4);
- return pc;
 }
 // A uniform candidate (u in [0,1)^2) moved into the patch: denser toward the
 // centre, inside a lumpy outline of at most radius * (1 + kGcPatchLump).

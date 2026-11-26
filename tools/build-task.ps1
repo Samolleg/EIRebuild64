@@ -1,7 +1,5 @@
 #requires -Version 7.6.10
 #requires -PSEdition Core
-# EID3D11_SHADER_STORE persists DXBC across worktrees in CacheRoot/ShaderStore.
-# Compiler-keyed entries share the cache size limit (40 GiB by default).
 param(
     [string]$CacheRoot = $env:EIREBUILD64_BUILD_CACHE,
     [switch]$PhysicsFxCheck,
@@ -149,10 +147,6 @@ try {
     $env:TMP = $privateTemp; $env:TEMP = $privateTemp
     $env:_MSPDBSRV_ENDPOINT_ = 'EI-' + [guid]::NewGuid().ToString('N')
     foreach ($name in 'CL','_CL_','LINK','_LINK_') { [Environment]::SetEnvironmentVariable($name,$null,'Process') }
-    $shaderCompilerKey = Hash-File "$env:SystemRoot/System32/d3dcompiler_47.dll"
-    $env:EID3D11_SHADER_STORE = Join-Path $CacheRoot ("ShaderStore/" + $shaderCompilerKey)
-    New-Item -ItemType Directory -Force -Path $env:EID3D11_SHADER_STORE | Out-Null
-    (Get-Item -LiteralPath $env:EID3D11_SHADER_STORE).LastWriteTimeUtc = [datetime]::UtcNow
     # Shared build metadata and toolchain; source payloads are keyed per library.
     $tracked = @(& git -C $repo -c core.quotepath=false ls-files --cached --others --exclude-standard | Sort-Object -Unique)
     if ($LASTEXITCODE -ne 0) { throw 'Cannot enumerate sources.' }
@@ -248,7 +242,7 @@ try {
         $reuseFolder = Split-Path -Parent $ShaderResourceManifest
         $destination = Join-Path $repo 'out/x64/Release/RendererShaders'
         New-Item -ItemType Directory -Force -Path $destination | Out-Null
-        $expectedNames = @('eid3d11_shaders.res','eid3d11_dxil.res','eid3d11_d3d12_shaders.res','eid3d11_camp_art.res')
+        $expectedNames = @('eid3d11_dxil.res','eid3d11_d3d12_shaders.res','eid3d11_camp_art.res')
         if (@($shaderReuse.files).Count -ne $expectedNames.Count) { throw 'Shader reuse payload count.' }
         foreach ($name in $expectedNames) {
             $entry = @($shaderReuse.files | Where-Object { $_.name -ceq $name })

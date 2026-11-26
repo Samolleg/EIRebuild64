@@ -122,7 +122,6 @@ def fingerprint(args):
         'compiler': args.vc / 'bin/Hostx64/x64', 'vc-lib': args.vc / 'lib/x64',
         'vc-include': args.vc / 'include', 'sdk-include': args.sdk / 'Include' / args.sdk_version,
         'sdk-lib': args.sdk / 'Lib' / args.sdk_version, 'sdk-bin': args.sdk / 'bin' / args.sdk_version / 'x64',
-        'd3dcompiler': Path(os.environ['SystemRoot']) / 'System32/d3dcompiler_47.dll',
         'powershell': args.pwsh, 'python': Path(sys.executable), 'git': Path(shutil.which('git')),
         'launch': project / 'tools/project/invoke-build.ps1', 'supervisor': project / 'tools/project/build_process.py',
     }

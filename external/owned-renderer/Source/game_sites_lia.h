@@ -300,6 +300,9 @@ constexpr std::uint32_t kLiaLightTableRva = 0x00235084;
 constexpr std::uint32_t kLiaLightManagerTableRva = 0x002350ec;
 constexpr std::uint32_t kLiaTorchTableRva = 0x0022b70c;
 constexpr std::uint32_t kLiaTorchSpecificTableRva = 0x0022b03c;
+// CLeverObject vtable: slot 0x98 IsScientific is byte-identical to base
+// 0x52BB00 and slot 0x9C IsScientificDoor reads the same +0x260 flag.
+constexpr std::uint32_t kLiaLeverTableRva = 0x0022b4ec;
 constexpr std::array<std::uint8_t,12> kLiaSkyGateStock{{0x8b,0x47,0x08,0xf6,0xc4,0x10,0x0f,0x84,0xb6,0,0,0}};
 constexpr std::array<std::array<std::uint64_t,3>,21> kLiaEnvironmentRanges{{
     {{0x00082950,0x11a,0x3a25be5c6c8db731ull}},
@@ -331,6 +334,9 @@ constexpr std::array<std::array<std::uint64_t,3>,4> kLiaCameraMouseRanges{{
     {{0x00010640,0x40,0xe92f33f4536e3e73ull}},
     {{0x00126760,0x2f,0x48dd3fb02daa72a8ull}},
 }};
+// OnMouseMove's Alt scroll test (MOV CL,[EAX+7E]; TEST CL,CL; JNZ); its 11
+// bytes are compared exactly before the JNZ is patched (#315).
+constexpr std::uint32_t kLiaCameraAltScrollSiteRva = 0x00126ce8;
 
 // Local server identity, retained window observers and save forwarding.
 constexpr std::uint32_t kLiaWorldServerRva = 0x002a33d8;

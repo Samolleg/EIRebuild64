@@ -1,6 +1,8 @@
 #include "owned_asset_loader.h"
 #include "environment_asset.h"
 #include "debug_output_paths.h"
+#include "contact_blend.h"
+#include "texture_mips.h"
 #include "owned_terrain_front_end.h"
 #include "owned_terrain_decode.h"
 #include "procedural_falls.h"
@@ -1754,12 +1756,57 @@ static bool parse_texture_asset_impl(const ResourceBlob& blob,
     return true;
 }
 
+namespace {
+// TerrainTexturePage::normalise_to_pool: a BC1 page with one level, or
+// smaller than the pool side, becomes a full chain at the pool layout
+// (normalised_bc1_chain). Its identity gets its own name, so the GPU texture
+// pool never shares it with the page's one-level upload elsewhere. log: on
+// the page's first load (one line per page). False leaves the page as it was.
+bool normalise_terrain_texture(std::shared_ptr<TextureCpuAsset>& texture, const char* log) {
+    if (texture->format != MmpFormat::dxt1 || texture->mips.empty() || !texture->source) return false;
+    const auto& source = *texture;
+    const unsigned width = source.width, height = source.height;
+    if (!width || !height || width != height) return false;
+    const bool undersized = width < contact_blend_atlas_side;
+    if (!undersized && source.mips.size() >= full_mip_count(width, height)) return false;
+    const auto& first = source.mips.front();
+    if (first.width != width || first.height != height || std::size_t(first.byte_offset) + first.bytes > source.source->size()) return false;
+    const auto start = std::chrono::steady_clock::now();
+    std::vector<Bc1ChainLevel> levels;double rms = 0;unsigned worst = 0;std::size_t peak = 0;
+    auto bytes = std::make_shared<std::vector<std::uint8_t>>(normalised_bc1_chain(
+        source.source->data() + first.byte_offset, width, height, contact_blend_atlas_side, levels, rms, worst, peak));
+    auto made = std::make_shared<TextureCpuAsset>(source);
+    made->identity.canonical_name += "|terrain-pool-chain";
+    made->width = levels.front().width;made->height = levels.front().height;
+    made->mips.clear();
+    for (const auto& level : levels)
+        made->mips.push_back({level.width, level.height, static_cast<std::uint32_t>(level.offset), static_cast<std::uint32_t>(level.bytes)});
+    // A page proven opaque stays so at every level (its blocks encode four colours).
+    made->opaque_mips = (source.opaque_mips & 1u) ? ~0u : 0u;
+    made->source = bytes;
+    if (log) {
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+        char text[400];
+        std::snprintf(text, sizeof(text),
+            "%s %ux%u levels=%zu -> %ux%u levels=%zu (%s) %.1f ms, +%.2f MB, working peak=%.1f MB; generated levels rms=%.2f worst=%u",
+            log, width, height, source.mips.size(), made->width, made->height, levels.size(),
+            undersized ? "upsampled to the pool side" : "chain generated", ms,
+            double(bytes->size() - first.bytes) / 1048576.0, double(peak) / 1048576.0, rms, worst);
+        bridge_append_probe_event("terrain_page_normalised", text);
+    }
+    texture = std::move(made);
+    return true;
+}
+} // namespace
+
 bool TerrainTexturePage::ensure_upload_bytes(ResourceFailure& failure, bool require_bc1_chain) const {
     if (texture) { failure = {}; return true; }
     ResourceBlob blob;
     if (!store || !store->read(location, blob, failure)) return false;
     auto loaded = std::make_shared<TextureCpuAsset>();
     if (!parse_texture_asset(blob, *loaded, failure)) return false;
+    if (normalise_to_pool)
+        normalise_terrain_texture(loaded, mip_count ? nullptr : blob.identity.canonical_name.c_str());
     if ((require_bc1_chain && (loaded->format != MmpFormat::dxt1 || loaded->mips.size() < 2)) ||
         (mip_count && loaded->mips.size() != mip_count)) {
         fail(failure, ResourceFailureCode::parse, "terrain page has no matching BC1 mip chain");
@@ -3587,6 +3634,7 @@ struct OwnedResourceLoader::Impl {
                  page < terrain->texture_resources.size(); ++page) {
                 auto& output = terrain->pages[page];
                 output.store = state->store;
+                output.normalise_to_pool = state->request.normalise_terrain_pages;
                 ResourceFailure page_failure{};
                 if (!state->store->locate(terrain->texture_resources[page] + ".mmp",
                                          output.location, page_failure) ||

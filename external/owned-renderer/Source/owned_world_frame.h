@@ -517,6 +517,7 @@ extern thread_local HRESULT g_owned_terrain_failure_hresult;
 extern thread_local BridgeFrameSample g_bridge_sample;
 extern std::atomic<bool> g_load_reveal_enabled;
 extern std::atomic<std::uint64_t> g_load_reveal_revealed_epoch;
+extern std::atomic<unsigned> g_load_reveal_unreported_draws;
 extern std::atomic<std::uint64_t> g_terrain_ring_pending_epoch;
 extern bool g_merge_character_parts;
 extern thread_local NativeGeometryBatchBeginFn g_native_sink_begin_batch;
@@ -615,10 +616,14 @@ std::shared_ptr<OwnedPortraitOverlay> owned_portrait_overlay(const std::string& 
 // kept by their model and part name (the unit's republished assembly does not
 // change them), so `model` (the unit's .mod) is resolved and opened only for
 // a figure not read before; a rebuild for a new assembly is then a copy.
+// `texture` resolves a texture file by name: the bare hair's base skin layer
+// (the hero's <model>skin_NN from its atlas' composition), never the composed
+// equipment atlas, whose hair strip equipment layers reuse (#279).
 using OwnedPortraitModel = std::function<bool(ResourceBlob& model)>;
+using OwnedPortraitTexture = std::function<bool(const std::string& name, ResourceBlob& texture)>;
 std::shared_ptr<const VisualAssemblyAsset> build_owned_portrait_bare_assembly(
-    const VisualAssemblyAsset& unit, const OwnedPortraitModel& model, std::int32_t hair,
-    const char*& reason) noexcept;
+    const VisualAssemblyAsset& unit, const OwnedPortraitModel& model, const OwnedPortraitTexture& texture,
+    std::int32_t hair, const char*& reason) noexcept;
 struct OwnedPreviewCommand {
     RetainedVisualSample sample;
     double texture_time = 0;

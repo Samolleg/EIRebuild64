@@ -10,30 +10,19 @@
 #include <iostream>
 #include <iomanip>
 #include <cstring>
-using Microsoft::WRL::ComPtr;
 namespace fs=std::filesystem;
 static void require(bool ok,const char* step){if(!ok)throw std::runtime_error(step);}
 static void hr(HRESULT value,const char* step){if(FAILED(value)){std::cerr<<step<<" hr="<<std::hex<<value<<std::dec<<'\n';throw std::runtime_error(step);}}
 struct Image{std::vector<std::uint8_t> pixels;UINT width=0,height=0;};
-static HRESULT Read11(void* context,ID3D11DeviceContext* dc,ID3D11Texture2D* source){
-    auto& image=*static_cast<Image*>(context);if(!source)return E_FAIL;
-    ComPtr<ID3D11Device> device;source->GetDevice(&device);D3D11_TEXTURE2D_DESC desc{};source->GetDesc(&desc);
-    image.width=desc.Width;image.height=desc.Height;desc.BindFlags=0;desc.Usage=D3D11_USAGE_STAGING;desc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;desc.MiscFlags=0;
-    ComPtr<ID3D11Texture2D> staging;HRESULT result=device->CreateTexture2D(&desc,nullptr,&staging);if(FAILED(result))return result;
-    dc->CopyResource(staging.Get(),source);D3D11_MAPPED_SUBRESOURCE mapped{};result=dc->Map(staging.Get(),0,D3D11_MAP_READ,0,&mapped);if(FAILED(result))return result;
-    image.pixels.resize(std::size_t(image.width)*image.height*4);
-    for(UINT y=0;y<image.height;++y)std::memcpy(image.pixels.data()+std::size_t(y)*image.width*4,static_cast<const char*>(mapped.pData)+std::size_t(y)*mapped.RowPitch,image.width*4);
-    dc->Unmap(staging.Get(),0);return S_OK;
-}
 static void save(const fs::path& path,const Image& image){
     BITMAPFILEHEADER f{};BITMAPINFOHEADER h{};h.biSize=sizeof(h);h.biWidth=image.width;h.biHeight=-LONG(image.height);h.biPlanes=1;h.biBitCount=32;h.biCompression=BI_RGB;h.biSizeImage=DWORD(image.pixels.size());
     f.bfType=0x4d42;f.bfOffBits=sizeof(f)+sizeof(h);f.bfSize=f.bfOffBits+h.biSizeImage;
     std::ofstream out(path,std::ios::binary);out.write(reinterpret_cast<const char*>(&f),sizeof(f));out.write(reinterpret_cast<const char*>(&h),sizeof(h));out.write(reinterpret_cast<const char*>(image.pixels.data()),image.pixels.size());require(bool(out),"save image");
 }
 int wmain(int argc,wchar_t** argv)try{
-    require(argc==4,"usage: check game-root output backend(11|12)");const fs::path game=fs::absolute(argv[1]),out=fs::absolute(argv[2]);const bool dx12=std::wstring(argv[3])==L"12";
+    require(argc==3,"usage: check game-root output");const fs::path game=fs::absolute(argv[1]),out=fs::absolute(argv[2]);
     fs::create_directories(out);const auto config=out/L"renderer.ini";
-    {std::ofstream ini(config);ini<<"[setup]\nfirst_run_done=1\n[graphics]\nrenderer_backend="<<(dx12?1:0)<<"\nrender_thread=1\nframe_generation=0\n";}
+    {std::ofstream ini(config);ini<<"[setup]\nfirst_run_done=1\n[graphics]\nrender_thread=1\nframe_generation=0\n";}
     owned::EmbeddedHostPaths paths;paths.renderer_config=config.wstring();paths.world_map_layouts=(game/L"MODS/Dejavu/world-map-layouts.json").wstring();
     paths.mounts.archives={(game/L"Base/Res/figures.res").wstring(),(game/L"Base/Res/textures.res").wstring(),(game/L"Base/Res/menus.res").wstring()};
     owned::embedded_host_configuration().configure(std::move(paths));
@@ -41,7 +30,7 @@ int wmain(int argc,wchar_t** argv)try{
     // Deliberately never show the diagnostic window.
     HWND window=CreateWindowExW(0,cls.lpszClassName,L"Physics FX check",WS_OVERLAPPEDWINDOW,0,0,640,480,nullptr,nullptr,cls.hInstance,nullptr);require(window!=nullptr,"hidden window");
     auto renderer=std::make_unique<owned::Renderer>();
-    hr(dx12?renderer->ensure(window,640,480):renderer->ensure_for_test_warp(window,640,480),"renderer initialize");
+    hr(renderer->ensure(window,640,480),"renderer initialize");
     PhysicsFx::World physics;std::vector<PhysicsFx::Triangle> terrain={{{-14,-14,0},{14,-14,0},{14,14,0}},{{-14,-14,0},{14,14,0},{-14,14,0}}};
     require(physics.AddPatch(1,{0,0,0},terrain)&&physics.Burst(1,{0,0,0},{0,0,1},1,42)==64,"PhysX GPU burst");
     OwnedRender::E1VisualInputs frame;frame.lightingValid=true;frame.ambient={.08f,.08f,.08f,1};frame.sunDiffuse={.9f,.9f,.9f,1};frame.sunDirection={.4f,-.4f,.82f,0};
@@ -72,8 +61,7 @@ int wmain(int argc,wchar_t** argv)try{
         hr(renderer->queue_embedded_batch(owned::Renderer::EmbeddedBatch::end_scene),"worker frame end");
         hr(renderer->finish_embedded_scene_commands(),"worker result before readback");
         Image image;
-        if(dx12)hr(renderer->read_embedded_d3d12_output(image.pixels,image.width,image.height),"read D3D12 pixels");
-        else hr(renderer->visit_embedded_output(&image,&Read11),"read D3D11 pixels");
+        hr(renderer->read_embedded_d3d12_output(image.pixels,image.width,image.height),"read D3D12 pixels");
         require(image.pixels.size()==std::size_t(image.width)*image.height*4&&!image.pixels.empty(),"image dimensions");
         unsigned colored=0;for(std::size_t p=0;p<image.pixels.size();p+=4)if(image.pixels[p]>45&&image.pixels[p+1]>45&&image.pixels[p+2]>45)++colored;
         save(out/(L"frame-"+std::to_wstring(tick)+L".bmp"),image);
@@ -82,5 +70,5 @@ int wmain(int argc,wchar_t** argv)try{
         previous=std::move(image);
     }
     require(changes>=3,"moving rendered physics");
-    renderer.reset();DestroyWindow(window);std::cout<<"RESULT PASS native D3D"<<(dx12?12:11)<<'\n';return 0;
+    renderer.reset();DestroyWindow(window);std::cout<<"RESULT PASS native D3D12"<<'\n';return 0;
 }catch(const std::exception& e){std::cerr<<"FAIL "<<e.what()<<'\n';return 1;}

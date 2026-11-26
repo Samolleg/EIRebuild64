@@ -2,6 +2,8 @@
 #include "frame_waits.h"
 #include "d3d12_core.h"
 #include "../../../../OwnedRenderer/Module/GraphicsApi.h"
+#include "../../Source/gpu_adapter.h"
+#include "d3d12_memory.h"
 
 #include <psapi.h>
 
@@ -32,6 +34,7 @@ bool DescriptorHeap::create(ID3D12Device* device, D3D12_DESCRIPTOR_HEAP_TYPE typ
                                                                           : "CreateDescriptorHeap (CBV/SRV/UAV)", hr);
         return false;
     }
+    track_memory(device, heap_.Get(), MemoryKind::descriptors);
     cpu_ = heap_->GetCPUDescriptorHandleForHeapStart();
     gpu_ = heap_->GetGPUDescriptorHandleForHeapStart();
     stride_ = device->GetDescriptorHandleIncrementSize(type);
@@ -58,6 +61,7 @@ bool DescriptorHeap::grow(ID3D12Device* device, std::uint32_t persistent, std::u
     ComPtr<ID3D12DescriptorHeap> heap;
     const HRESULT hr = device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&heap));
     if (FAILED(hr)) { reason = hresult_text("CreateDescriptorHeap (larger CBV/SRV/UAV ring)", hr); return false; }
+    track_memory(device, heap.Get(), MemoryKind::descriptors);
     // Shader-visible descriptors cannot be a copy source. Keep the same
     // persistent indices using the CPU-readable views that authored them.
     ComPtr<ID3D12DescriptorHeap> persistent_heap;

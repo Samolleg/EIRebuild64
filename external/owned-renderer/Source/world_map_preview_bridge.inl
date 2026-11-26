@@ -114,8 +114,9 @@ void __fastcall hook_map_preview_first_load_frame(int wanted, void *) {
   g_map_preview_published = false;
   g_map_preview_sections = 0;
   g_map_preview_inputs_failed = false;
-  // The first loading picture precedes this serial host command. Preparing
-  // the cache finishes before subsequent loading/UI draws can reach the host.
+  // The first loading picture precedes this host command. It starts the
+  // cache's preparation on a background thread (#309); a map opened before
+  // it lands shows its sections as loading.
   if (++g_map_preview_generation == 0)
     ++g_map_preview_generation;
   try {

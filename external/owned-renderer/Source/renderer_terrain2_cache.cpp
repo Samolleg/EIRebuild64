@@ -51,7 +51,49 @@ std::uint64_t fnv(std::uint64_t h,const void* data,std::size_t bytes){
 
 float level_density(unsigned l){return kTerrain2CacheTopDensity/float(1u<<l);}
 
+// The bake's GPU share of a frame (#309), the budget before the GPU's cost
+// per texel is known, and the smallest budget (a 128 x 128 rectangle; also
+// the smallest bake whose time is believed: below it, fixed costs dominate).
+constexpr double kTerrain2CacheBakeMs=4.0;
+constexpr long long kTerrain2CacheBakeStart=256*1024,kTerrain2CacheBakeMin=16*1024;
+// How far a map's inputs reach past its rectangle, metres: terrain2.hlsl's
+// border band t2BorderBand (3 m, terrain2MapShare) and a metre to spare.
+constexpr double kTerrain2CacheBandMetres=4.0;
+
 }  // namespace
+
+// The bake timings that have finished: the cost per texel rises at once to a
+// slower measurement and falls halfway to a faster one. A timing the GPU has
+// not answered for 64 frames (a lost D3D12 stamp, a device reset) is dropped.
+void Renderer::read_terrain2_bake_timing() noexcept{
+ for(auto& t:terrain2_bake_timing_){
+  if(!t.pending)continue;
+  double ms=-1;bool ready=false;
+  if(d3d12_){
+   auto& stamps=d3d12_->profile_timestamps();
+   std::uint64_t a=0,b=0;
+   if(stamps.value(t.stamp_begin,a)&&stamps.value(t.stamp_end,b)){
+    ready=true;
+    const std::uint64_t frequency=stamps.frequency();
+    if(frequency&&b>=a)ms=double(b-a)*1000.0/double(frequency);
+   }
+  }else if(context_&&t.disjoint){
+   D3D11_QUERY_DATA_TIMESTAMP_DISJOINT disjoint{};UINT64 a=0,b=0;
+   if(context_->GetData(t.disjoint.Get(),&disjoint,sizeof(disjoint),D3D11_ASYNC_GETDATA_DONOTFLUSH)==S_OK&&
+      context_->GetData(t.begin.Get(),&a,sizeof(a),D3D11_ASYNC_GETDATA_DONOTFLUSH)==S_OK&&
+      context_->GetData(t.end.Get(),&b,sizeof(b),D3D11_ASYNC_GETDATA_DONOTFLUSH)==S_OK){
+    ready=true;
+    if(!disjoint.Disjoint&&disjoint.Frequency&&b>=a)ms=double(b-a)*1000.0/double(disjoint.Frequency);
+   }
+  }
+  if(!ready){if(native_frame_index_>t.frame+64)t.pending=false;continue;}
+  t.pending=false;
+  if(ms<0||t.texels<kTerrain2CacheBakeMin)continue;
+  const double ns=ms*1e6/double(t.texels);
+  if(terrain2_bake_ns_per_texel_<=0||ns>terrain2_bake_ns_per_texel_){terrain2_bake_ns_per_texel_=ns;terrain2_bake_measured_texels_=t.texels;}
+  else{terrain2_bake_ns_per_texel_=(terrain2_bake_ns_per_texel_+ns)*.5;terrain2_bake_measured_texels_=std::max(terrain2_bake_measured_texels_,t.texels);}
+ }
+}
 
 void append_terrain2_cache_shader_programs(std::vector<ShaderProgram>& out){
  const std::string& source=owned_native_shader_source();
@@ -301,6 +343,46 @@ std::uint64_t Renderer::terrain2_inputs_hash() const noexcept{
  return inputs;
 }
 
+// The material cache's inputs, split (#309): the returned hash covers what
+// every texel reads (the frame's material switches and blend values, the
+// surface bake, the active map's generation and layout); each table map's
+// own hash covers its record (rectangle, origin, layout, readiness, its
+// resources' places), its height bakes and its ground and contact
+// readiness. A texel reads another map only within the border band of that
+// map's rectangle (terrain2MapShare), so a map's change reaches no texel
+// outside its rectangle widened by the band. The table's entry count is left
+// out: an added map adds a share of 0 everywhere outside its band.
+std::uint64_t Renderer::terrain2_cache_inputs(std::array<Terrain2CacheMapInputs,kTerrain2TableMaps>& maps,unsigned& count) const noexcept{
+ std::uint64_t inputs=1469598103934665603ull;
+ inputs=fnv(inputs,terrain2_cache_frame_values_.data(),23*sizeof(float)); // [23]: the table's entry count
+ inputs=fnv(inputs,terrain_surface_bake_.data(),sizeof(terrain_surface_bake_)); // S3: crevice strength and class roughness (baked alpha)
+ inputs=fnv(inputs,&ambient_map_generation_,sizeof(ambient_map_generation_));
+ inputs=fnv(inputs,terrain_layout_origin_.data(),sizeof(terrain_layout_origin_));
+ count=std::min(terrain2_table_count_,kTerrain2TableMaps);
+ for(unsigned k=0;k<count;++k){
+  auto& m=maps[k];
+  const float* r=terrain2_cache_frame_values_.data()+24+4*kTerrain2Records*k;
+  m.id=terrain2_table_[k];m.rect={r[0],r[1],r[2],r[3]};
+  std::uint64_t h=1469598103934665603ull;
+  h=fnv(h,&k,sizeof(k));h=fnv(h,r,4*kTerrain2Records*sizeof(float));
+  if(m.id==0){
+   const bool own_ground=gc_map_generation_==ambient_map_generation_&&
+    (d3d12_?gc12_.map.ground&&gc12_.map.generation==ambient_map_generation_:bool(ambient_ground_srv_));
+   h=fnv(h,&own_ground,sizeof(own_ground));h=fnv(h,&contact_maps_.ready,sizeof(contact_maps_.ready));
+   h=fnv(h,&contact_map_generation_,sizeof(contact_map_generation_));h=fnv(h,&contact_constants_generation_,sizeof(contact_constants_generation_));
+   h=fnv(h,&terrain2_map_.revision,sizeof(terrain2_map_.revision));
+  }else for(const auto& n:gc_neighbours_)if(n.contact_map==m.id){
+   const unsigned char state=d3d12_?
+    (n.cover12.color_ready?1:0)|(n.contact.tiles12?2:0)|(n.contact.atlas12?4:0)|(n.terrain2.height12&&!n.terrain2.mips12?8:0):
+    (n.prepared?1:0)|(n.contact.tiles?2:0)|(n.contact.atlas?4:0)|(n.terrain2.height_srv?8:0);
+   h=fnv(h,&state,1);h=fnv(h,&n.contact.ready,sizeof(n.contact.ready));h=fnv(h,&n.terrain2.revision,sizeof(n.terrain2.revision));
+   break;
+  }
+  m.hash=h;
+ }
+ return inputs;
+}
+
 // The D3D11 state a bake pass changes, saved before it and restored after
 // (the material cache and the face cache bakes run inside the world flush).
 void Renderer::save_bake_state(BakeStateD3D11& s) noexcept{
@@ -467,7 +549,10 @@ void Renderer::update_terrain2_cache() noexcept try{
  }
  // Allocation by demand: the fine array grows to the slices this view
  // needs (never shrinks within a map), the atlas follows the world.
- bool reset_all=false;HRESULT hr=S_OK;
+ // A reallocated array empties only the levels it holds (a neighbour's
+ // arrival grows the world and with it the coarse atlas; the fine slices
+ // follow the eye and keep their texels).
+ bool reset_fine=false,reset_coarse=false;HRESULT hr=S_OK;
  if(fine_count&&(side!=terrain2_cache_side_||int(fine_count)>terrain2_cache_slices_)){
   const int slices=int(fine_count);
   terrain2_cache_fine_.Reset();terrain2_cache_fine_srv_.Reset();terrain2_cache_fine_rtvs_.clear();terrain2_cache_fine12_.reset();
@@ -491,7 +576,7 @@ void Renderer::update_terrain2_cache() noexcept try{
   };
   hr=fine(DXGI_FORMAT_R8G8B8A8_UNORM,terrain2_cache_fine12_,terrain2_cache_fine_,terrain2_cache_fine_srv_,terrain2_cache_fine_rtvs_);
   if(SUCCEEDED(hr))hr=fine(kTerrain2CacheHeightFormat,terrain2_cache_height_fine12_,terrain2_cache_height_fine_,terrain2_cache_height_fine_srv_,terrain2_cache_height_fine_rtvs_);
-  terrain2_cache_side_=side;terrain2_cache_slices_=slices;reset_all=true;
+  terrain2_cache_side_=side;terrain2_cache_slices_=slices;reset_fine=true;
  }
  if(SUCCEEDED(hr)&&(coarse_w!=terrain2_cache_coarse_size_[0]||coarse_h!=terrain2_cache_coarse_size_[1])){
   terrain2_cache_coarse_.Reset();terrain2_cache_coarse_srv_.Reset();terrain2_cache_coarse_rtv_.Reset();terrain2_cache_coarse12_.reset();
@@ -509,7 +594,7 @@ void Renderer::update_terrain2_cache() noexcept try{
   };
   hr=coarse(DXGI_FORMAT_R8G8B8A8_UNORM,terrain2_cache_coarse12_,terrain2_cache_coarse_,terrain2_cache_coarse_srv_,terrain2_cache_coarse_rtv_);
   if(SUCCEEDED(hr))hr=coarse(kTerrain2CacheHeightFormat,terrain2_cache_height_coarse12_,terrain2_cache_height_coarse_,terrain2_cache_height_coarse_srv_,terrain2_cache_height_coarse_rtv_);
-  terrain2_cache_coarse_size_[0]=coarse_w;terrain2_cache_coarse_size_[1]=coarse_h;reset_all=true;
+  terrain2_cache_coarse_size_[0]=coarse_w;terrain2_cache_coarse_size_[1]=coarse_h;reset_coarse=true;
  }
  if(FAILED(hr)){
   release_terrain2_cache();terrain2_cache_failed_=true;
@@ -517,8 +602,8 @@ void Renderer::update_terrain2_cache() noexcept try{
    side,fine_count,coarse_w,coarse_h,static_cast<unsigned long>(hr));
   bridge_append_probe_event("terrain2_cache_omitted",text);bind_terrain2_cache();return;
  }
- if(reset_all){
-  for(auto& level:terrain2_cache_levels_)level=Terrain2CacheLevelState{};
+ if(reset_fine||reset_coarse){
+  for(auto& level:terrain2_cache_levels_)if(level.fine?reset_fine:reset_coarse)level=Terrain2CacheLevelState{};
   const double mb=(double(side)*side*terrain2_cache_slices_*(fine_count?1:0)+double(coarse_w)*coarse_h)*(sizeof(void*)==8?6:5)/1048576.0; // RGBA8 colour + the height layer (S3; x64: R8G8 with the bed flag)
   char text[256];std::snprintf(text,sizeof(text),"side=%d px_per_m=%.0f nearest=%.1f levels=%u..%u fine=%u slices=%d atlas=%dx%d mb=%.1f",
    side,pixels,nearest,first,last,fine_count,terrain2_cache_slices_,coarse_w,coarse_h,mb);
@@ -526,9 +611,26 @@ void Renderer::update_terrain2_cache() noexcept try{
  }
 
  // Inputs: everything terrain2Color reads besides the texel's position.
- const std::uint64_t inputs=terrain2_inputs_hash();
+ // A change of the shared ones empties every level; a change confined to
+ // table maps (one arriving or leaving, its heights, its readiness) empties
+ // their rectangles, old and new, widened by the border band (regions).
+ std::array<Terrain2CacheMapInputs,kTerrain2TableMaps> maps{};unsigned map_count=0;
+ const std::uint64_t inputs=terrain2_cache_inputs(maps,map_count);
  const bool changed=inputs!=terrain2_cache_inputs_;
- terrain2_cache_inputs_=inputs;
+ std::array<std::array<float,4>,2*kTerrain2TableMaps> regions{};unsigned region_count=0;
+ if(!changed){
+  const auto add=[&](const std::array<float,4>& rect){if(region_count<regions.size())regions[region_count++]=rect;};
+  for(unsigned k=0;k<map_count;++k){
+   const Terrain2CacheMapInputs* old=nullptr;
+   for(unsigned j=0;j<terrain2_cache_map_count_;++j)if(terrain2_cache_maps_[j].id==maps[k].id)old=&terrain2_cache_maps_[j];
+   if(!old||old->hash!=maps[k].hash){add(maps[k].rect);if(old&&old->rect!=maps[k].rect)add(old->rect);}
+  }
+  for(unsigned j=0;j<terrain2_cache_map_count_;++j){
+   bool kept=false;for(unsigned k=0;k<map_count;++k)kept=kept||maps[k].id==terrain2_cache_maps_[j].id;
+   if(!kept)add(terrain2_cache_maps_[j].rect);
+  }
+ }
+ terrain2_cache_inputs_=inputs;terrain2_cache_maps_=maps;terrain2_cache_map_count_=map_count;
  // Inputs that never settle would keep every level empty (all per pixel,
  // plus a full bake budget each frame): named once a map.
  terrain2_cache_unsettled_=changed?terrain2_cache_unsettled_+1:0;
@@ -590,8 +692,18 @@ void Renderer::update_terrain2_cache() noexcept try{
    level.atlas[0]=coarse_at[l][0];level.atlas[1]=coarse_at[l][1];level.valid={};level.pending.clear();level.window={};
   }
   const bool moved=window.x0!=level.window.x0||window.y0!=level.window.y0||window.x1!=level.window.x1||window.y1!=level.window.y1;
-  if(changed||moved){
+  if(changed||moved||region_count){
    if(changed)level.valid={};
+   // A region's texels leave the valid rectangle: it keeps its largest
+   // piece outside them, the rest bakes again (pending below).
+   for(unsigned g=0;g<region_count&&!changed;++g){
+    const auto& m=regions[g];
+    const Terrain2CacheRect stale{texel_lo(m[0]-kTerrain2CacheBandMetres,d),texel_lo(m[1]-kTerrain2CacheBandMetres,d),
+                                  texel_hi(m[2]+kTerrain2CacheBandMetres,d),texel_hi(m[3]+kTerrain2CacheBandMetres,d)};
+    Terrain2CacheRect keep{};
+    terrain2_cache_subtract(level.valid,stale,[&](const Terrain2CacheRect& r){if(r.area()>keep.area())keep=r;});
+    level.valid=keep;
+   }
    level.valid=terrain2_cache_intersect(level.valid,window);
    level.window=window;
    level.pending.clear();
@@ -600,16 +712,41 @@ void Renderer::update_terrain2_cache() noexcept try{
   }
  }
 
- // Bake: coarse levels first, within the texel budget.
+ // Bake: coarse levels first, within the texel budget. Option
+ // terrain2_cache_bake (k texels) is the ceiling; the GPU's measured cost per
+ // texel sets the frame's share below it (#309: 4096 K texels held a
+ // GTX 1070 Ti past the 2 s TDR limit). Unmeasured: kTerrain2CacheBakeStart;
+ // never more than twice the largest bake measured at the current figure.
+ read_terrain2_bake_timing();
  long long budget=std::max(256,configured_integer(config,"terrain2_cache_bake",4096))*1024ll;
+ if(terrain2_bake_ns_per_texel_>0)budget=std::min(budget,static_cast<long long>(kTerrain2CacheBakeMs*1e6/terrain2_bake_ns_per_texel_));
+ budget=std::min(budget,std::max(kTerrain2CacheBakeStart,2*terrain2_bake_measured_texels_));
+ budget=std::max(budget,kTerrain2CacheBakeMin);
+ const long long frame_budget=budget;
  bool any=false;
  for(unsigned l=last+1;l-->first;)if(!terrain2_cache_levels_[l].pending.empty())any=true;
  if(any){
   transition_profile_pass("terrain2_cache");
+  // The frame's bake between a timestamp pair (a free slot; else untimed).
+  Terrain2BakeTiming* timing=nullptr;
+  for(auto& t:terrain2_bake_timing_)if(!t.pending){timing=&t;break;}
+  if(timing&&!d3d12_&&!timing->disjoint){
+   D3D11_QUERY_DESC q{D3D11_QUERY_TIMESTAMP_DISJOINT,0};
+   if(FAILED(device_->CreateQuery(&q,&timing->disjoint)))timing->disjoint.Reset();
+   q.Query=D3D11_QUERY_TIMESTAMP;
+   if(timing->disjoint&&(FAILED(device_->CreateQuery(&q,&timing->begin))||FAILED(device_->CreateQuery(&q,&timing->end))))
+    timing->disjoint.Reset();
+  }
+  if(timing&&!d3d12_&&!timing->disjoint)timing=nullptr;
+  if(timing){
+   if(d3d12_)timing->stamp_begin=d3d12_->profile_timestamps().stamp();
+   else{context_->Begin(timing->disjoint.Get());context_->End(timing->begin.Get());}
+  }
+  long long baked=0;
   // The bake within the budget; false from a rectangle (D3D12: its pipeline
   // still compiling, or dropped) stops this frame's bake, the rest stays pending.
   const auto bake_all=[&]{
-  long long baked=0;bool stopped=false;
+  bool stopped=false;
   for(unsigned l=last+1;l-->first&&budget>0&&!stopped;){
    auto& level=terrain2_cache_levels_[l];
    while(!level.pending.empty()&&budget>0){
@@ -633,8 +770,8 @@ void Renderer::update_terrain2_cache() noexcept try{
   bool complete=true;for(unsigned l=first;l<=last;++l)complete=complete&&terrain2_cache_levels_[l].pending.empty();
   if(complete){
    if(terrain2_cache_fill_texels_>=std::uint64_t(side)*side){
-    char text[160];std::snprintf(text,sizeof(text),"texels=%llu frames=%llu levels=%u..%u",static_cast<unsigned long long>(terrain2_cache_fill_texels_),
-     static_cast<unsigned long long>(terrain2_cache_fill_frames_),first,last);
+    char text[200];std::snprintf(text,sizeof(text),"texels=%llu frames=%llu levels=%u..%u budget_k=%lld ns_per_texel=%.2f",static_cast<unsigned long long>(terrain2_cache_fill_texels_),
+     static_cast<unsigned long long>(terrain2_cache_fill_frames_),first,last,frame_budget/1024,terrain2_bake_ns_per_texel_);
     bridge_append_probe_event("terrain2_cache_filled",text);
    }
    terrain2_cache_fill_texels_=terrain2_cache_fill_frames_=0;
@@ -658,6 +795,13 @@ void Renderer::update_terrain2_cache() noexcept try{
   bake_all();
 
   restore_bake_state(state);
+  }
+  if(timing){
+   if(d3d12_)timing->stamp_end=d3d12_->profile_timestamps().stamp();
+   else{context_->End(timing->end.Get());context_->End(timing->disjoint.Get());}
+   // D3D12: a stamp the slot had no room for is 0 (the slot grows next time round): untimed.
+   timing->pending=!d3d12_||(timing->stamp_begin&&timing->stamp_end);
+   timing->texels=baked;timing->frame=native_frame_index_;
   }
   end_profile_pass();
  }

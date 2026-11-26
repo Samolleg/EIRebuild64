@@ -80,6 +80,15 @@ const std::uint8_t* parse_dispatcher(const std::uint8_t* dispatcher,
     return callback;
 }
 
+// The forwarder/fill checks after a dispatcher parsed. `current` holds the
+// entry bytes when the dispatcher is the entry's own jump target, or is null
+// for a dispatcher reached through another module's layered detour.
+EntryResolution resolve_chain(const std::uint8_t* entry, const std::uint8_t* dispatcher,
+                              const std::uint8_t* callback, Convention convention,
+                              const std::uint8_t* stock, std::size_t stock_bytes,
+                              std::size_t hook_bytes, bool (*callback_owned)(const void*),
+                              const std::uint8_t* current) noexcept;
+
 } // namespace
 
 static OwnedEntryResolver g_owned_entry_resolver = nullptr;
@@ -173,6 +182,37 @@ EntryResolution resolve_entry_owner(const std::uint8_t* entry,
         result.reason = "raw_replacement";
         return result;
     }
+    return resolve_chain(entry, dispatcher, callback, convention, stock, stock_bytes, hook_bytes,
+                         callback_owned, current);
+}
+
+const std::uint8_t* layered_framework_dispatcher(const std::uint8_t* entry,
+                                                 const std::uint8_t* const* slot,
+                                                 const std::uint8_t* stock,
+                                                 std::size_t stock_bytes,
+                                                 bool (*callback_owned)(const void*),
+                                                 const std::uint8_t** callback) noexcept {
+    const std::uint8_t* dispatcher = nullptr;
+    if (!entry || !stock || stock_bytes > 32 || !readable_copy(&dispatcher, slot, sizeof(dispatcher)))
+        return nullptr;
+    Convention convention = Convention::stack;
+    const std::uint8_t* found = parse_dispatcher(dispatcher, convention);
+    if (!found) return nullptr;
+    const EntryResolution chain = resolve_chain(entry, dispatcher, found, convention, stock,
+                                                stock_bytes, 5, callback_owned, nullptr);
+    if (chain.owner != EntryOwner::framework_chain) return nullptr;
+    if (callback) *callback = chain.callback;
+    return dispatcher;
+}
+
+namespace {
+
+EntryResolution resolve_chain(const std::uint8_t* entry, const std::uint8_t* dispatcher,
+                              const std::uint8_t* callback, Convention convention,
+                              const std::uint8_t* stock, std::size_t stock_bytes,
+                              std::size_t hook_bytes, bool (*callback_owned)(const void*),
+                              const std::uint8_t* current) noexcept {
+    EntryResolution result{};
     if (!callback_owned || !callback_owned(callback)) {
         result.reason = "dispatcher_callback_outside_addon";
         return result;
@@ -211,7 +251,7 @@ EntryResolution resolve_entry_owner(const std::uint8_t* entry,
                 result.reason = "forwarder_padding_mismatch";
                 return result;
             }
-        for (std::size_t index = 5; index < length; ++index)
+        for (std::size_t index = 5; current && index < length; ++index)
             if (current[index] != 0x90) {
                 result.reason = "addon_patch_fill_mismatch";
                 return result;
@@ -231,4 +271,5 @@ EntryResolution resolve_entry_owner(const std::uint8_t* entry,
     return result;
 }
 
+} // namespace
 } // namespace owned

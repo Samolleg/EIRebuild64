@@ -1,6 +1,7 @@
 #include "ui_language.h"
 
 #include "debug_overlay_config.h"
+#include "engine_bridge.h"
 #include "graphics_settings.h"
 #include "renderer_ui_ru.h"
 
@@ -15,8 +16,11 @@
 #include <atomic>
 #include <cstring>
 #include <cwchar>
+#include <deque>
+#include <string>
 #include <string_view>
 #include <unordered_map>
+#include <vector>
 
 namespace owned {
 namespace {
@@ -71,9 +75,128 @@ const ui_ru::KeyEntry* setting_entry(std::string_view key) {
     return found == map.end() ? nullptr : found->second;
 }
 
+// A Russian menu string without a translation is logged (bridge.jsonl
+// "ui_untranslated", host.log on the render host) the first time a thread
+// misses it (remembered_miss), so a settings route lists every gap. Strings
+// without letters (numbers, units, format-only) need none.
+void report_untranslated(std::string_view english) {
+    bool letter = false;
+    for (const char c : english) letter |= (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
+    if (!letter) return;
+    std::string text(english);
+    for (char& c : text)
+        if (c == '\0') c = '|';
+        else if (c == '"' || c == '\\' || c == '\n') c = '\'';
+    bridge_report_event("ui_untranslated", text.c_str());
+}
+
+// Length of the printf conversion at format[at] == '%' ("%08lX", "%.1f",
+// "%u"); 0 for "%%" or anything else.
+std::size_t conversion_length(std::string_view format, std::size_t at) {
+    std::size_t i = at + 1;
+    while (i < format.size() && std::strchr("-+ #0", format[i])) ++i;
+    while (i < format.size() && format[i] >= '0' && format[i] <= '9') ++i;
+    if (i < format.size() && format[i] == '.') ++i;
+    while (i < format.size() && format[i] >= '0' && format[i] <= '9') ++i;
+    while (i < format.size() && std::strchr("hlz", format[i])) ++i;
+    return i < format.size() && std::strchr("diuxXfgs", format[i]) ? i + 1 - at : 0;
+}
+
+// Whether a formatted text came from this format; values gets the text of
+// each conversion. Numbers take every character of their kind; %s takes the
+// shortest text that lets the rest match.
+bool match_format(std::string_view format, std::string_view text, std::vector<std::string_view>& values) {
+    std::size_t f = 0, t = 0;
+    while (f < format.size()) {
+        const std::size_t length = format[f] == '%' ? conversion_length(format, f) : 0;
+        if (!length) {
+            const std::size_t literal = format[f] == '%' && f + 1 < format.size() && format[f + 1] == '%' ? 2 : 1;
+            if (t >= text.size() || text[t] != format[f + literal - 1]) return false;
+            f += literal;
+            ++t;
+            continue;
+        }
+        const char type = format[f + length - 1];
+        f += length;
+        if (type == 's') {
+            const std::size_t mark = values.size();
+            for (std::size_t end = t; end <= text.size(); ++end) {
+                values.resize(mark);
+                values.push_back(text.substr(t, end - t));
+                if (match_format(format.substr(f), text.substr(end), values)) return true;
+            }
+            values.resize(mark);
+            return false;
+        }
+        const char* kind = type == 'x' || type == 'X' ? "0123456789abcdefABCDEF" :
+                           type == 'f' || type == 'g' ? "-0123456789." : "-0123456789";
+        const std::size_t start = t;
+        while (t < text.size() && std::strchr(kind, text[t])) ++t;
+        if (t == start) return false;
+        values.push_back(text.substr(start, t - start));
+    }
+    return t == text.size();
+}
+
+// A text formatted at run time (an error code, a size) has no exact entry:
+// it matches an entry whose English is the printf format, and its values go
+// into that entry's Russian format (same conversions in the same order); a
+// %s value that has an exact entry is translated too. The result is stored
+// in storage; nullptr when no format matches.
+const char* format_russian(std::string_view english, std::deque<std::string>& storage) {
+    std::vector<std::string_view> values;
+    for (const auto& entry : ui_ru::kText) {
+        const std::string_view format(entry.english);
+        if (format.find('%') == std::string_view::npos) continue;
+        values.clear();
+        if (!match_format(format, english, values)) continue;
+        std::string russian;
+        std::size_t next = 0;
+        const std::string_view target(entry.russian);
+        for (std::size_t i = 0; i < target.size(); ++i) {
+            const std::size_t length = target[i] == '%' ? conversion_length(target, i) : 0;
+            if (!length) {
+                russian.push_back(target[i]);
+                if (target[i] == '%' && i + 1 < target.size() && target[i + 1] == '%') ++i;
+                continue;
+            }
+            if (next < values.size()) {
+                const auto exact = target[i + length - 1] == 's' ? text_map().find(values[next]) : text_map().end();
+                russian.append(exact != text_map().end() ? std::string_view(exact->second) : values[next]);
+            }
+            ++next;
+            i += length - 1;
+        }
+        if (next != values.size()) continue;
+        storage.push_back(std::move(russian));
+        return storage.back().c_str();
+    }
+    return nullptr;
+}
+
+// A text without an exact entry, per thread (the menus draw on one): its
+// formatted Russian or nullptr, worked out and logged on the first miss.
+// A repeat costs one hash lookup: no allocation, no lock. Entries stay for
+// the thread's life (returned pointers stay valid); past kMaxRemembered a
+// new text is neither remembered nor formatted and stays English.
+const char* remembered_miss(std::string_view english, bool formatted) {
+    constexpr std::size_t kMaxRemembered = 1024;
+    thread_local std::deque<std::string> storage;  // keys and results; a deque never moves them
+    thread_local std::unordered_map<std::string_view, const char*> results;
+    if (const auto found = results.find(english); found != results.end()) return found->second;
+    if (results.size() >= kMaxRemembered) return nullptr;
+    const char* russian = formatted ? format_russian(english, storage) : nullptr;
+    if (!russian) report_untranslated(english);
+    storage.emplace_back(english);
+    results.emplace(storage.back(), russian);
+    return russian;
+}
+
 const char* lookup(const TextMap& map, std::string_view english, const char* fallback) {
     const auto found = map.find(english);
-    return found == map.end() ? fallback : found->second;
+    if (found != map.end()) return found->second;
+    remembered_miss(english, false);
+    return fallback;
 }
 
 } // namespace
@@ -108,7 +231,12 @@ unsigned game_text_code_page() noexcept { return g_game_text_code_page.load(std:
 
 const char* ui_text(const char* english) noexcept {
     if (!english || !ui_russian()) return english;
-    try { return lookup(text_map(), english, english); } catch (...) { return english; }
+    try {
+        const auto found = text_map().find(english);
+        if (found != text_map().end()) return found->second;
+        if (const char* russian = remembered_miss(english, true)) return russian;
+    } catch (...) {}
+    return english;
 }
 
 const char* ui_choices(const char* english) noexcept {
@@ -140,6 +268,7 @@ const char* ui_setting_label(const PlayerGraphicsSetting& setting) noexcept {
     if (!ui_russian()) return setting.label;
     try {
         if (const auto* entry = setting_entry(setting.key); entry && entry->label) return entry->label;
+        remembered_miss(setting.label, false);
     } catch (...) {}
     return setting.label;
 }
@@ -148,6 +277,7 @@ const char* ui_setting_tooltip(const PlayerGraphicsSetting& setting) noexcept {
     if (!ui_russian()) return setting.tooltip;
     try {
         if (const auto* entry = setting_entry(setting.key); entry && entry->description) return entry->description;
+        remembered_miss(setting.tooltip, false);
     } catch (...) {}
     return setting.tooltip;
 }

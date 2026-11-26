@@ -344,7 +344,20 @@ HRESULT Renderer::draw_game_particles(const GameParticleView& view,const FixedSt
  PerfScope perf(&perf_draw_ticks_);if(perf_enabled())++perf_draw_calls_;
  if((!d3d12_&&(!device_||!context_))||!view.particles||!view.count)return E_INVALIDARG;
  if(view.interface_pass){const HRESULT hr=composite_world();if(FAILED(hr))return hr;}
- if(rt_emissive_enabled_)gather_particle_light_samples(view,st,texture);
+ // fire_burn: a campfire or a fire (the game's own) melts the snow around it.
+ if(!view.interface_pass&&(view.source_type==0x2001u||view.source_type==0x2003u)&&fire_campfires_.size()<64&&
+    configured_boolean(debug_overlay_.config(),"fire_burn",false)){
+  double x=0,y=0;for(std::uint32_t k=0;k<view.count;++k){x+=view.particles[k].x;y+=view.particles[k].y;}
+  x/=view.count;y/=view.count;
+  if(std::isfinite(x)&&std::isfinite(y)&&std::none_of(fire_campfires_.begin(),fire_campfires_.end(),
+     [&](const auto& c){return std::hypot(c[0]-x,c[1]-y)<1.;}))fire_campfires_.push_back({float(x),float(y)});
+  if(view.source_type==0x2001u&&std::isfinite(x)&&std::isfinite(y)){
+   auto seen=std::find_if(fire_campfire_seen_.begin(),fire_campfire_seen_.end(),[&](const auto& c){return std::hypot(c[0]-x,c[1]-y)<1.;});
+   if(seen!=fire_campfire_seen_.end())(*seen)[2]=double(native_frame_index_);
+   else if(fire_campfire_seen_.size()<64)fire_campfire_seen_.push_back({x,y,double(native_frame_index_)});
+  }
+ }
+ if(particle_lights_enabled_)gather_particle_light_samples(view,st,texture);
  if(HRESULT created=ensure_game_particle_pipeline();FAILED(created))return created;
  try{
   if(game_particle_order_.capacity()/4>(std::max)(view.count,kGameParticleBatch))
@@ -370,9 +383,10 @@ HRESULT Renderer::draw_game_particles(const GameParticleView& view,const FixedSt
 // rt_emissive: a world effect call's place. Its points are clip = M * p in
 // the call's own space; the scene's clip-to-world matrix takes them to the
 // world whatever that space is. A size in clip x units times W is metres over
-// the length of the world-to-clip x row.
+// the length of the world-to-clip x row. Both backends (#263): the scene's
+// world-to-clip snapshot is the bridge's, whatever the device.
 bool Renderer::particle_light_place(const float* object_to_clip,double place[16],double& row_x) const noexcept{
- if(!d3d12_||scene_composited_||hit_test_active_||native_shadow_collecting_)return false;
+ if(scene_composited_||hit_test_active_||native_shadow_collecting_)return false;
  const auto scene=bridge_scene_world_to_clip_snapshot();
  float clip_to_world[16];
  if(!scene.valid||!ambient_occlusion_invert(scene.world_to_clip.data(),clip_to_world))return false;
@@ -817,7 +831,8 @@ HRESULT Renderer::draw_game_ribbon(const GameRibbonView& view,const FixedState& 
  PerfScope perf(&perf_draw_ticks_);if(perf_enabled())++perf_draw_calls_;
  if((!d3d12_&&(!device_||!context_))||!view.points||view.count<2)return E_INVALIDARG;
  if(view.interface_pass){const HRESULT hr=composite_world();if(FAILED(hr))return hr;}
- if(rt_emissive_enabled_)gather_ribbon_light_samples(view,texture);
+ note_fire_strike(view); // fire_burn: a bolt at the ground ignites there
+ if(particle_lights_enabled_)gather_ribbon_light_samples(view,texture);
  if(HRESULT created=ensure_game_particle_pipeline();FAILED(created))return created;
  try{game_effect_elements_.resize(view.count);}catch(const std::bad_alloc&){return E_OUTOFMEMORY;}
  for(std::uint32_t j=0;j<view.count;++j)
@@ -2076,12 +2091,11 @@ ID3D11ShaderResourceView* empty[5]{};context_->PSSetShaderResources(8,1,empty);c
    bridge_append_probe_event("water_copy_before_opaque_draw",bucket.semantic_kind==SemanticKind::terrain?"terrain":
     draw.instance.lighting_enabled?"figure":"object");
   }
-  // Stock-look water (water_simple prototype): liquid batches draw whole
+  // Original water (water_simple, Lowest): liquid batches draw whole
   // through the ground variant (nativeLiquidLayer bit 3), no reflections.
   const bool stock_water=liquid_batch&&water_simple;
   const bool water_reflections=liquid_batch&&!stock_water&&prepare_water_reflections(st);
   if(liquid_batch&&!stock_water)bound_color_targets=~0u; // its scene copy may leave the targets unbound
-  if(liquid_batch){++water_liquid_batches_;if(water_reflections)++water_reflection_batches_;}
   prepare_liquid_ripples(); // frame time also drives caustics on terrain under water
   if(water_reflections&&!water_ssr_done){
    if(FAILED(hr=trace_water()))return native_flush_failure_line_=__LINE__,finish(hr);
@@ -2387,12 +2401,138 @@ ID3D11ShaderResourceView* empty[5]{};context_->PSSetShaderResources(8,1,empty);c
    {ID3D11Buffer* full=liquid_ripple_ready_?liquid_ripple_constants_.Get():nullptr;context_->PSSetConstantBuffers(8,1,&full);}
   }
   if(write_history)shadow_history_written_=true;perf_native_draws_+=group_draw_count;++perf_native_batches_;perf_native_vertices_+=logical_triangles*3u;++native_frame_stats_.native_physical_batches;if(group_draw_count==1)++native_frame_stats_.native_one_draw_batches;native_frame_stats_.native_max_batch_draws=std::max<std::uint64_t>(native_frame_stats_.native_max_batch_draws,group_draw_count);}
+ // Alt interact overlay (#315): only on frames with Alt held, only in world
+ // flushes, and only the batches whose work names a marked record; one more
+ // indirect draw each, without depth, into the overlay target.
+ if(interact_overlay_&&!scene_composited_&&!hit_test_active_&&rtv_.Get()==scene_composite_.target()){
+  auto& marked=interact_overlay_batches_;bool any=false;
+  try{marked.assign(native_batch_staging_.size(),0);}catch(...){marked.clear();}
+  for(const auto& work:native_draw_work_staging_){
+   if(work.record==UINT_MAX||work.record>=native_instance_records_.size()||marked.empty())continue;
+   const UINT flags=native_instance_records_[work.record].command.instance.flags;
+   if((flags&native_sway_flag)!=0||(flags&native_overlay_mask)==0)continue;
+   const std::size_t index=work.indirect_args_byte_offset/16u;
+   if(index<marked.size()){marked[index]=1;any=true;}
+  }
+  D3D11_TEXTURE2D_DESC target{};
+  if(any){ComPtr<ID3D11Resource> resource;rtv_->GetResource(resource.GetAddressOf());ComPtr<ID3D11Texture2D> texture;
+   if(resource&&SUCCEEDED(resource.As(&texture)))texture->GetDesc(&target);}
+  if(any&&target.Width&&SUCCEEDED(ensure_interact_overlay(target.Width,target.Height))){
+   transition_profile_pass("interact_overlay");
+   if(interact_overlay_drawn_frame_!=native_frame_index_){
+    const float clear[4]{};context_->ClearRenderTargetView(overlay_rtv_.Get(),clear);interact_overlay_drawn_frame_=native_frame_index_;
+   }
+   if(tessellation_bound){context_->HSSetShader(nullptr,nullptr,0);context_->DSSetShader(nullptr,nullptr,0);tessellation_bound=false;}
+   context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+   // The flush's own targets (with history and ambient) come back after.
+   ComPtr<ID3D11RenderTargetView> saved[3];ComPtr<ID3D11DepthStencilView> saved_depth;
+   {ID3D11RenderTargetView* views[3]{};ID3D11DepthStencilView* depth=nullptr;context_->OMGetRenderTargets(3,views,&depth);
+    for(int i=0;i<3;++i)saved[i].Attach(views[i]);saved_depth.Attach(depth);}
+   context_->OMSetRenderTargets(1,overlay_rtv_.GetAddressOf(),nullptr);
+   context_->VSSetShader(native_overlay_vs_.Get(),nullptr,0);context_->PSSetShader(native_overlay_ps_.Get(),nullptr,0);
+   for(std::size_t batch_index=0;batch_index<native_batch_staging_.size();++batch_index){
+    if(!marked[batch_index])continue;
+    const NativeBatch& batch=native_batch_staging_[batch_index];
+    const auto* baked=static_reuse?&bake.batches[batch_index]:nullptr;
+    const NativeQueuedDraw& draw=baked?native_instance_records_[baked->first_record].command:native_queued_draw(native_draw_order_[batch.first_draw]);
+    const NativeStateBucket& bucket=native_state_buckets_[batch.state_bucket];
+    if(bucket.semantic_kind==SemanticKind::terrain)continue;
+    ID3D11ShaderResourceView* geometry=native_geometry_page_srv(batch.geometry_page);if(!geometry)continue;
+    context_->VSSetShaderResources(1,1,&geometry);
+    ID3D11ShaderResourceView* contact_views[4];const Constants constants=batch_constants(batch,draw,bucket,contact_views);
+    if(FAILED(hr=upload_draw_constants(&constants,sizeof(constants))))return native_flush_failure_line_=__LINE__,finish(hr);
+    previous_constants=constants;have_constants=true;
+    apply_state(bucket.state,bucket.texture_srv!=nullptr,draw.hud_composition);
+    // The material's texture: nativeOverlayPS hides what the material pass's alpha hides.
+    {ID3D11ShaderResourceView* texture=bucket.texture_array?nullptr:bucket.texture_srv.Get();
+     ID3D11ShaderResourceView* texture_array=bucket.texture_array?bucket.texture_srv.Get():nullptr;
+     context_->PSSetShaderResources(0,1,&texture);context_->PSSetShaderResources(6,1,&texture_array);}
+    context_->RSSetState(overlay_raster_.Get());context_->OMSetDepthStencilState(overlay_depth_state_.Get(),0);
+    context_->OMSetBlendState(nullptr,nullptr,0xffffffffu);
+    context_->DrawInstancedIndirect(native_indirect_args_.Get(),static_cast<UINT>(batch_index)*16u);
+    profiler_.add_draw(0,static_cast<UINT>(batch.draw_count));profiler_.add_batch();
+   }
+   context_->VSSetShader(native_vs_.Get(),nullptr,0);
+   {ID3D11RenderTargetView* views[3]={saved[0].Get(),saved[1].Get(),saved[2].Get()};context_->OMSetRenderTargets(3,views,saved_depth.Get());}
+  }
+ }
  // Fur prototype (renderer_fur.cpp): this flush's unit records with fur,
  // while their world vertices and the flush's lighting are still bound.
  draw_fur_records();
  ID3D11ShaderResourceView* null_texture=nullptr;context_->PSSetShaderResources(0,1,&null_texture);context_->PSSetShaderResources(6,1,&null_texture);context_->PSSetShaderResources(37,1,&null_texture);context_->PSSetShaderResources(38,1,&null_texture);context_->VSSetShaderResources(1,8,null_srvs);context_->PSSetShaderResources(126,1,&null_texture);
  {ID3D11ShaderResourceView* none[3]{};context_->PSSetShaderResources(123,3,none);}trim_material_profiles();
  if(water_ssr_done){ID3D11ShaderResourceView* none[4]{};context_->PSSetShaderResources(29,4,none);}context_->VSSetConstantBuffers(1,1,&null_constant);end_profile_pass();return native_flush_failure_line_=__LINE__,finish(S_OK);
+}
+
+// ---- Alt interact overlay (#315) ----
+// Batches holding a record with an overlay class (native_instance_flags.h)
+// draw again at the end of their flush, without depth, into a world-size
+// target (nativeOverlayVS moves every other record outside the clip volume);
+// composite_world blends it over the finished world, after any upscale.
+// Nothing runs on frames without Alt held (set_interact_overlay).
+HRESULT Renderer::ensure_interact_overlay(UINT width, UINT height) noexcept {
+ if(interact_overlay_failed_||!device_)return E_FAIL;
+ HRESULT hr=S_OK;
+ if(!native_overlay_vs_){
+  std::vector<ShaderProgram> programs;
+  try{append_interact_overlay_shader_programs(programs);}catch(...){interact_overlay_failed_=true;return E_OUTOFMEMORY;}
+  ComPtr<ID3DBlob> code[4];
+  for(std::size_t i=0;i<4&&SUCCEEDED(hr);++i){ComPtr<ID3DBlob> errors;hr=compile_shader(programs[i],&code[i],&errors);
+   if(FAILED(hr)&&errors)OutputDebugStringA(static_cast<const char*>(errors->GetBufferPointer()));}
+  if(SUCCEEDED(hr))hr=create_shader(device_.Get(),code[0]->GetBufferPointer(),code[0]->GetBufferSize(),nullptr,native_overlay_vs_.ReleaseAndGetAddressOf());
+  if(SUCCEEDED(hr))hr=create_shader(device_.Get(),code[1]->GetBufferPointer(),code[1]->GetBufferSize(),nullptr,native_overlay_ps_.ReleaseAndGetAddressOf());
+  if(SUCCEEDED(hr))hr=create_shader(device_.Get(),code[2]->GetBufferPointer(),code[2]->GetBufferSize(),nullptr,overlay_composite_vs_.ReleaseAndGetAddressOf());
+  if(SUCCEEDED(hr))hr=create_shader(device_.Get(),code[3]->GetBufferPointer(),code[3]->GetBufferSize(),nullptr,overlay_composite_ps_.ReleaseAndGetAddressOf());
+  if(SUCCEEDED(hr)){D3D11_DEPTH_STENCIL_DESC d{};d.DepthEnable=FALSE;d.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ZERO;d.DepthFunc=D3D11_COMPARISON_ALWAYS;hr=device_->CreateDepthStencilState(&d,overlay_depth_state_.ReleaseAndGetAddressOf());}
+  if(SUCCEEDED(hr)){D3D11_RASTERIZER_DESC r{};r.FillMode=D3D11_FILL_SOLID;r.CullMode=D3D11_CULL_NONE;r.DepthClipEnable=TRUE;hr=device_->CreateRasterizerState(&r,overlay_raster_.ReleaseAndGetAddressOf());}
+  if(SUCCEEDED(hr)){D3D11_BLEND_DESC b{};auto& t=b.RenderTarget[0];t.BlendEnable=TRUE;t.SrcBlend=D3D11_BLEND_SRC_ALPHA;t.DestBlend=D3D11_BLEND_INV_SRC_ALPHA;t.BlendOp=D3D11_BLEND_OP_ADD;
+   t.SrcBlendAlpha=D3D11_BLEND_ZERO;t.DestBlendAlpha=D3D11_BLEND_ONE;t.BlendOpAlpha=D3D11_BLEND_OP_ADD;t.RenderTargetWriteMask=D3D11_COLOR_WRITE_ENABLE_ALL;
+   hr=device_->CreateBlendState(&b,overlay_blend_.ReleaseAndGetAddressOf());}
+  if(SUCCEEDED(hr)){D3D11_SAMPLER_DESC s{};s.Filter=D3D11_FILTER_MIN_MAG_MIP_LINEAR;s.AddressU=s.AddressV=s.AddressW=D3D11_TEXTURE_ADDRESS_CLAMP;s.MaxLOD=D3D11_FLOAT32_MAX;
+   hr=device_->CreateSamplerState(&s,overlay_sampler_.ReleaseAndGetAddressOf());}
+  if(FAILED(hr)){
+   release_interact_overlay();interact_overlay_failed_=true;
+   bridge_report_event("interact_overlay_omitted","Alt interact overlay programs or states could not be created; Alt shows no overlay.");
+   return hr;
+  }
+ }
+ D3D11_TEXTURE2D_DESC current{};if(overlay_texture_)overlay_texture_->GetDesc(&current);
+ if(!overlay_texture_||current.Width!=width||current.Height!=height){
+  overlay_rtv_.Reset();overlay_srv_.Reset();overlay_texture_.Reset();
+  D3D11_TEXTURE2D_DESC t{};t.Width=width;t.Height=height;t.MipLevels=1;t.ArraySize=1;t.Format=DXGI_FORMAT_R8G8B8A8_UNORM;t.SampleDesc.Count=1;
+  t.Usage=D3D11_USAGE_DEFAULT;t.BindFlags=D3D11_BIND_RENDER_TARGET|D3D11_BIND_SHADER_RESOURCE;
+  if(FAILED(hr=device_->CreateTexture2D(&t,nullptr,overlay_texture_.GetAddressOf()))||
+     FAILED(hr=device_->CreateRenderTargetView(overlay_texture_.Get(),nullptr,overlay_rtv_.GetAddressOf()))||
+     FAILED(hr=device_->CreateShaderResourceView(overlay_texture_.Get(),nullptr,overlay_srv_.GetAddressOf()))){
+   overlay_rtv_.Reset();overlay_srv_.Reset();overlay_texture_.Reset();return hr;
+  }
+ }
+ return S_OK;
+}
+
+void Renderer::composite_interact_overlay() noexcept {
+ if(interact_overlay_drawn_frame_!=native_frame_index_||!overlay_srv_||!overlay_composite_vs_||!backbuffer_rtv_)return;
+ interact_overlay_drawn_frame_=UINT64_MAX;
+ transition_profile_pass("interact_overlay_composite");
+ const D3D11_VIEWPORT viewport{0,0,float(output_width_),float(output_height_),0,1};
+ context_->RSSetViewports(1,&viewport);context_->RSSetState(overlay_raster_.Get());
+ context_->OMSetRenderTargets(1,backbuffer_rtv_.GetAddressOf(),nullptr);
+ context_->OMSetDepthStencilState(overlay_depth_state_.Get(),0);context_->OMSetBlendState(overlay_blend_.Get(),nullptr,0xffffffffu);
+ context_->IASetInputLayout(nullptr);context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+ context_->VSSetShader(overlay_composite_vs_.Get(),nullptr,0);context_->PSSetShader(overlay_composite_ps_.Get(),nullptr,0);
+ context_->HSSetShader(nullptr,nullptr,0);context_->DSSetShader(nullptr,nullptr,0);
+ context_->PSSetShaderResources(0,1,overlay_srv_.GetAddressOf());context_->PSSetSamplers(0,1,overlay_sampler_.GetAddressOf());
+ context_->Draw(3,0);profiler_.add_draw(1,1);profiler_.add_batch();
+ ID3D11ShaderResourceView* none=nullptr;context_->PSSetShaderResources(0,1,&none);
+ context_->OMSetBlendState(nullptr,nullptr,0xffffffffu);
+}
+
+void Renderer::release_interact_overlay() noexcept {
+ native_overlay_vs_.Reset();native_overlay_ps_.Reset();overlay_composite_vs_.Reset();overlay_composite_ps_.Reset();
+ overlay_rtv_.Reset();overlay_srv_.Reset();overlay_texture_.Reset();
+ overlay_depth_state_.Reset();overlay_raster_.Reset();overlay_blend_.Reset();overlay_sampler_.Reset();
+ overlay12_.reset();overlay12_programs_.clear();
+ interact_overlay_drawn_frame_=UINT64_MAX;
 }
 
 } // namespace owned

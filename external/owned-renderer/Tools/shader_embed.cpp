@@ -1,31 +1,9 @@
-// Build step: compiles the renderer's fixed shader program list (every
-// feature's append_*_shader_programs, from the same production sources as the
-// DLL) and writes the table the DLL embeds as the EID3D11_SHADERS resource
-// (Source/shader_cache.h), plus the one-line .rc that names it.
-//
-//   shader_embed <output.bin> [--preset-cache] [--dxil-sources <directory>] [--prepare-keys]
-//
-// Optional EID3D11_SHADER_STORE=<folder>: compiled programs shared across
-// worktrees and commits (see store_file below), keyed by the preprocessed
-// program, so an edit recompiles only the programs whose code it reaches.
-//
-// The previous output is the incremental cache: a program whose key it
-// already holds is reused, so only edited programs are compiled again; stale
-// entries are simply not written. A compile error fails the build.
-//
-// --dxil-sources writes the same program list for the x64 host's DXIL table
-// (Host\host.mak compiles it with the SDK's dxc.exe, one .dxil a program):
-// each distinct composed source once as src\<source hash>.hlsl, an nmake
-// fragment dxil.mak with one rule a program, and dxil.rc naming every .dxil
-// as an RCDATA resource. A file is rewritten only when its content changed,
-// so nmake recompiles only programs whose source changed.
+// Export the shared shader programs and embedded-game variants for DXC.
 #include "renderer.h"
 #ifdef EID3D11_EMBEDDED
 #include "embedded_triangle_shader.h"
 #endif
 #include "dxil_table.h"
-
-#include <d3d11shader.h>
 
 #include <cctype>
 #include <cstdio>
@@ -171,20 +149,43 @@ int write_dxil_sources(const std::string& directory, const std::vector<ShaderPro
             }
             list << " \\\n $(DXIL)\\" << out << ".dxil";
             parts[rule_count++ % kParts] << " \\\n $(DXIL)\\" << out << ".dxil";
-            rules << "$(DXIL)\\" << out << ".dxil: $(DXIL)\\src\\" << hash << ".hlsl\n"
-                  // -HV 2018: the language rules FXC and DXC 1.6 used (HLSL 2021,
-                  // DXC 1.7+'s default, rejects the shared HLSL's vector ternaries).
-                  // EID3D12: the shared HLSL's D3D12-only parts (bindless reads); FXC
-                  // never gets it, so the DXBC table is unchanged.
-                  << "\t@\"$(DXC)\" -nologo -HV 2018 -T " << profile << " -E " << program.entry
-                  << ((program.flags & D3DCOMPILE_OPTIMIZATION_LEVEL3) ? " -O3" : "") << " -D EID3D12=1"
-                  << (variant ? " -D EID3D12_HAZARDS=1" : "") << defines
-                  // A program that includes the NVIDIA RTXDI library's headers (its
-                  // RTXDI_SDK define): they are read in place from the SDK folder at
-                  // build time (Host/build.cmd RTXDI_SDK), never from this tree.
-                  << (define_value(program, "RTXDI_SDK") ? " -I \"$(RTXDI_SDK)\\Include\"" : "")
-                  << " -Qstrip_debug -Qstrip_reflect -Fo $@ $(DXIL)\\src\\" << hash << ".hlsl > $(DXIL)\\log\\" << out
-                  << ".txt 2>&1 || type nul > $@\n";
+            // -HV 2018: the language rules FXC and DXC 1.6 used (HLSL 2021,
+            // DXC 1.7+'s default, rejects the shared HLSL's vector ternaries).
+            // EID3D12: the shared HLSL's D3D12-only parts (bindless reads); FXC
+            // never gets it, so the DXBC table is unchanged.
+            const std::string arguments = std::string(" -nologo -HV 2018 -T ") + profile + " -E " + program.entry +
+                ((program.flags & D3DCOMPILE_OPTIMIZATION_LEVEL3) ? " -O3" : "") + " -D EID3D12=1" +
+                (variant ? " -D EID3D12_HAZARDS=1" : "") + defines;
+            // A program that includes the NVIDIA RTXDI library's headers (its
+            // RTXDI_SDK define): they are read in place from the SDK folder at
+            // build time (Host/build.cmd RTXDI_SDK), never from this tree.
+            const bool rtxdi = define_value(program, "RTXDI_SDK") != nullptr;
+            const std::string compile = "\"$(DXC)\"" + arguments + (rtxdi ? " -I \"$(RTXDI_SDK)\\Include\"" : "") +
+                " -Qstrip_debug -Qstrip_reflect -Fo $@ $(DXIL)\\src\\" + hash + ".hlsl > $(DXIL)\\log\\" + out + ".txt 2>&1";
+            rules << "$(DXIL)\\" << out << ".dxil: $(DXIL)\\src\\" << hash << ".hlsl\n";
+            if (rtxdi) {
+                // Its headers are outside the source text: no store entry.
+                rules << "\t@" << compile << " || type nul > $@\n";
+            } else {
+                // DXIL_STORE (Host/build.cmd: a folder per dxc version): the
+                // compiled program keyed by its exact source and arguments, so
+                // a fresh worktree copies what another build compiled. Only a
+                // program dxc accepted is stored; the copy goes through a
+                // temporary name so a concurrent build never reads half a file.
+                shader_cache_detail::Hasher k;
+                k.text("dxil store 1");
+                k.bytes(program.source.data(), program.source.size());
+                k.text(arguments.c_str());
+                char key[40];
+                std::snprintf(key, sizeof(key), "%016llX%016llX", static_cast<unsigned long long>(k.a),
+                              static_cast<unsigned long long>(k.b));
+                const std::string stored = std::string("\"$(DXIL_STORE)\\") + key + ".dxil\"";
+                const std::string temporary = std::string("\"$(DXIL_STORE)\\") + key + "." + out + ".tmp\"";
+                // (copy /b stored+nul: a combined copy takes the current time, so
+                // nmake sees the .dxil newer than its source.)
+                rules << "\t@if exist " << stored << " (copy /y /b " << stored << "+nul $@ >nul) else (" << compile << " && (copy /y $@ "
+                      << temporary << " >nul 2>&1 && move /y " << temporary << " " << stored << " >nul 2>&1 & ver >nul) || type nul > $@)\n";
+            }
             rc << out << " RCDATA \"" << out << ".dxil\"\n";
         }
     }
@@ -210,270 +211,19 @@ int write_dxil_sources(const std::string& directory, const std::vector<ShaderPro
     return 0;
 }
 
-// EID3D11_SHADER_STORE (optional): a folder shared by every worktree's build,
-// one DXBC file per program key. The previous output and the preset folder
-// hold only the last commit's programs, so switching commits recompiled
-// everything the other commit had; the store keeps both. Never pruned here:
-// delete the folder to reclaim its space.
-std::string g_store;
-ShaderKey g_compiler_key;
-// Hash the DLL actually providing D3DCompile, including servicing updates.
-bool identify_compiler() {
-    // &D3DCompile can name the EXE's import thunk, so resolve the export
-    // before finding its module. Hashing the thunk's module hashes this tool
-    // and invalidates unchanged shaders whenever its C++ code changes.
-    const HMODULE compiler = GetModuleHandleW(D3DCOMPILER_DLL_W);
-    const FARPROC compile = compiler ? GetProcAddress(compiler, "D3DCompile") : nullptr;
-    HMODULE module = nullptr;
-    if (!compile || !GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                                       reinterpret_cast<LPCWSTR>(compile), &module)) return false;
-    wchar_t path[32768];
-    const DWORD length = GetModuleFileNameW(module, path, 32768);
-    if (!length || length >= 32768) return false;
-    std::ifstream in(path, std::ios::binary);
-    if (!in) return false;
-    shader_cache_detail::Hasher h;
-    char buffer[65536];
-    while (in.read(buffer, sizeof(buffer)) || in.gcount()) h.bytes(buffer, static_cast<std::size_t>(in.gcount()));
-    if (!in.eof()) return false;
-    g_compiler_key = {h.a, h.b};
-    return true;
-}
-std::string store_file(const ShaderKey& key) {
-    std::string narrow;
-    for (const wchar_t ch : native_spec_cache_file_name(key)) narrow += static_cast<char>(ch); // hex digits and ".dxbc"
-    return g_store + "\\" + narrow;
-}
-bool store_read(const ShaderKey& key, std::string& code) {
-    if (g_store.empty()) return false;
-    std::ifstream in(store_file(key), std::ios::binary);
-    if (!in) return false;
-    code.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
-    return !code.empty();
-}
-// Written through a temporary name, so a concurrent build never reads a
-// partial file; a failed write only costs a later recompile.
-void store_write(const ShaderKey& key, const void* code, std::size_t size) {
-    if (g_store.empty()) return;
-    const std::string path = store_file(key), temporary = path + "." + std::to_string(GetCurrentThreadId()) + ".tmp";
-    {
-        std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
-        out.write(static_cast<const char*>(code), static_cast<std::streamsize>(size));
-        if (!out) { out.close(); DeleteFileA(temporary.c_str()); return; }
-    }
-    if (!MoveFileExA(temporary.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING)) DeleteFileA(temporary.c_str());
-}
-// The store's key: the program as FXC sees it after preprocessing (its
-// defines applied, comments and #if-excluded code gone), its entry, profile
-// and flags, plus the loaded compiler DLL fingerprint. Includes and defines
-// are resolved by D3DPreprocess; compilation uses the same null include handler.
-// The table key (shader_key) hashes the composed source, which
-// every program built from the native source shares, so before this any
-// edit there recompiled all of them (~186 programs; a terrain edit reached
-// the ground cover, fog and critter programs too). Preprocessing a program
-// takes milliseconds; compiling a terrain variant takes tens of seconds.
-// Hash tokens rather than FXC's whitespace and source-location presentation.
-// Preserve token boundaries (a + +b differs from a++b), literal contents,
-// and expanded __LINE__ values, which can affect actual shader behaviour.
-void hash_preprocessed(shader_cache_detail::Hasher& h, const char* p, const char* end) {
-    bool line_start = true;
-    const auto identifier = [](char c) {
-        return std::isalnum(static_cast<unsigned char>(c)) || c == '_';
-    };
-    while (p < end && *p) {
-        if (std::isspace(static_cast<unsigned char>(*p))) {
-            if (*p == '\n') line_start = true;
-            ++p;
-            continue;
-        }
-        if (line_start && *p == '#') {
-            const char* directive = p + 1;
-            while (directive < end && (*directive == ' ' || *directive == '\t')) ++directive;
-            if ((end - directive >= 4 && !std::strncmp(directive, "line", 4) &&
-                 (directive + 4 == end || std::isspace(static_cast<unsigned char>(directive[4])))) ||
-                (directive < end && std::isdigit(static_cast<unsigned char>(*directive)))) {
-                while (p < end && *p && *p != '\n') ++p;
-                continue;
-            }
-        }
-        line_start = false;
-        const char* begin = p++;
-        if (*begin == '"' || *begin == '\'') {
-            while (p < end && *p) {
-                if (*p == '\\' && p + 1 < end) { p += 2; continue; }
-                if (*p++ == *begin) break;
-            }
-        } else if (std::isdigit(static_cast<unsigned char>(*begin)) ||
-                   (*begin == '.' && p < end && std::isdigit(static_cast<unsigned char>(*p)))) {
-            // Preprocessing numbers include hexadecimal and exponent signs.
-            while (p < end && (identifier(*p) || *p == '.' ||
-                   ((*p == '+' || *p == '-') && std::strchr("eEpP", p[-1])))) ++p;
-        } else if (identifier(*begin)) {
-            while (p < end && identifier(*p)) ++p;
-        } else {
-            static const char* const operators[] = {"<<=", ">>=", "...", "++", "--", "->", "&&", "||",
-                "<=", ">=", "==", "!=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<", ">>", "::", "##"};
-            for (const char* op : operators) {
-                const std::size_t size = std::strlen(op);
-                if (std::size_t(end - begin) >= size && !std::strncmp(begin, op, size)) {
-                    p = begin + size;
-                    break;
-                }
-            }
-        }
-        h.bytes(begin, std::size_t(p - begin));
-        h.text(nullptr); // token separator
-    }
-}
-bool compile_key(const ShaderProgram& program, ShaderKey& key, ShaderKey& legacy_key) {
-    Microsoft::WRL::ComPtr<ID3DBlob> text, messages;
-    if (FAILED(D3DPreprocess(program.source.data(), program.source.size(), program.name, program.defines, nullptr, &text,
-                             &messages)))
-        return false;
-    const char* p = static_cast<const char*>(text->GetBufferPointer());
-    const char* const end = p + text->GetBufferSize();
-    shader_cache_detail::Hasher h;
-    // Migration only: remove after the first complete store migration.
-    // Reproduce v3 exactly, including its insignificant whitespace.
-    shader_cache_detail::Hasher legacy;
-    legacy.text("preprocessed 3");
-    legacy.bytes(&g_compiler_key.a, sizeof(g_compiler_key.a));
-    legacy.bytes(&g_compiler_key.b, sizeof(g_compiler_key.b));
-    for (const char* line = p; line < end;) {
-        const char* next = static_cast<const char*>(std::memchr(line, '\n', std::size_t(end - line)));
-        next = next ? next + 1 : end;
-        if (!(next - line >= 5 && !std::strncmp(line, "#line", 5))) legacy.bytes(line, std::size_t(next - line));
-        line = next;
-    }
-    legacy.text(program.entry);
-    legacy.text(program.profile);
-    legacy.bytes(&program.flags, sizeof(program.flags));
-    legacy_key = {legacy.a, legacy.b};
-    h.text("preprocessed tokens 4");
-    h.bytes(&g_compiler_key.a, sizeof(g_compiler_key.a));
-    h.bytes(&g_compiler_key.b, sizeof(g_compiler_key.b));
-    hash_preprocessed(h, p, end);
-    for (const D3D_SHADER_MACRO* define = program.defines; define && define->Name; ++define) {
-        h.text(define->Name);
-        h.text(define->Definition);
-    }
-    h.text(nullptr); // end of macro fields
-    h.text(program.entry);
-    h.text(program.profile);
-    h.bytes(&program.flags, sizeof(program.flags));
-    key = {h.a, h.b};
-    return true;
-}
-// "entry DEFINE=1 ..." for the compile-time list.
-std::string program_label(const ShaderProgram& program) {
-    std::string label = program.entry;
-    for (const D3D_SHADER_MACRO* define = program.defines; define && define->Name; ++define) {
-        label += ' ';
-        label += define->Name;
-        if (define->Definition && std::strcmp(define->Definition, "1")) label += std::string("=") + define->Definition;
-    }
-    return label;
-}
-// The shader-size gate (memory rule: slots and temps per variant are a merge
-// gate): every native object pixel program's temps and instructions (DXBC
-// reflection, fxc /O3) printed; a material instance program over its
-// master's budget fails the build. Budgets: the domain's object program,
-// its prepassed (NATIVE_SHADOW_MASK) program two temps lower.
-int native_pixel_gate(const std::vector<ShaderProgram>& programs, const std::vector<std::pair<ShaderKey, std::string>>& table) {
-    struct Budget { const char* name; UINT temps, instructions; };
-    // NATIVE_DOMAIN 1..4 (renderer.h kNativeInstance*), without then with NATIVE_PROFILED.
-    // Instructions +100 over the shader split's table (cand-1108): bugfix-1107's haze runs
-    // fogHazeColorAt per pixel (sky-probe tap, chroma limit, lit-white fit),
-    // +86 slots on every object program; temps unchanged. Hoisting it is a follow-up issue.
-    // Instructions +140 more (bounce-seam-1108, director decision): the sun bounce reads the
-    // world volume past the active map and blends the two over its last 8 m (nativeCaveBounce),
-    // +117..+130 slots; temps unchanged; that work sits behind a dynamic branch.
-    // Profiled unit +50 more (materials-1108): lamp-lit figures take the texture relief
-    // normal in the lamp loop (~+95 slots, temps unchanged); director decision
-    // after the bz14h camp A/B (fade only read plastic under lamps).
-    static const Budget budgets[2][4] = {{{"unit", 30, 3740}, {"world", 40, 5840}, {"foliage", 40, 5740}, {"impostor", 43, 6640}},
-                                         {{"unit", 40, 4490}, {"world", 42, 6240}, {"foliage", 44, 6040}, {"impostor", 45, 6940}}};
-    int failed = 0;
-    for (std::size_t i = 0; i < programs.size(); ++i) {
-        const ShaderProgram& program = programs[i];
-        const bool vertex = !std::strcmp(program.entry, "nativeVS") || !std::strcmp(program.entry, "nativePrepassVS");
-        if ((std::strcmp(program.entry, "nativePS") && !vertex) || program.source != owned_native_shader_source() ||
-            define_value(program, "NATIVE_DOMAIN_CHECK"))
-            continue;
-        Microsoft::WRL::ComPtr<ID3D11ShaderReflection> reflection;
-        D3D11_SHADER_DESC desc{};
-        if (FAILED(D3DReflect(table[i].second.data(), table[i].second.size(), IID_ID3D11ShaderReflection,
-                              reinterpret_cast<void**>(reflection.GetAddressOf()))) || FAILED(reflection->GetDesc(&desc))) {
-            std::fprintf(stderr, "shader_embed: gate: cannot reflect %s\n", program_label(program).c_str());
-            ++failed;
-            continue;
-        }
-        const char* domain = define_value(program, "NATIVE_DOMAIN");
-        const bool masked = define_value(program, "NATIVE_SHADOW_MASK") != nullptr;
-        const Budget* budget = nullptr;
-        const char* profiled = define_value(program, "NATIVE_PROFILED");
-        if (!vertex && domain && *domain >= '1' && *domain <= '4') budget = &budgets[profiled && !std::strcmp(profiled, "0") ? 0 : 1][*domain - '1'];
-        // The crystal domains (5 world object, 6 unit; always profiled) keep their
-        // base domain's profiled budget: the crystal shading costs instructions
-        // (+184 world, +139 unit, crystals-1114), never temps.
-        if (!vertex && domain && (*domain == '5' || *domain == '6')) budget = &budgets[1][*domain == '5' ? 1 : 0];
-        const UINT temps = budget ? budget->temps - (masked ? 2u : 0u) : 0u;
-        // The hard cap for every object pixel program (terrain is its own master):
-        // 47 temps and up is the register cliff the RTX 3070 laptop fell off (2.7 ms).
-        // Vertex programs are printed only (the instance vertex programs 56 / 41 temps).
-        const bool capped = !vertex && !define_value(program, "NATIVE_TERRAIN_PS") && desc.TempRegisterCount >= 47;
-        const bool over = capped || (budget && (desc.TempRegisterCount > temps || desc.InstructionCount > budget->instructions));
-        std::printf("shader_embed: gate %-9s temps %3u instructions %5u %s%s\n", budget ? budget->name : vertex ? "vertex" : "general",
-                    desc.TempRegisterCount, desc.InstructionCount, program_label(program).c_str(), over ? "  OVER BUDGET" : "");
-        if (over) ++failed;
-    }
-    if (failed) std::fprintf(stderr, "shader_embed: %d native pixel program(s) over the size budget\n", failed);
-    return failed ? 1 : 0;
-}
+
 } // namespace
 
 int main(int argc, char** argv) {
-    bool preset_cache = false, prepare_keys = false, usage = argc < 2;
-    std::string dxil_directory;
-    for (int i = 2; i < argc && !usage; ++i) {
-        if (!std::strcmp(argv[i], "--prepare-keys")) prepare_keys = true;
-        else if (!std::strcmp(argv[i], "--preset-cache")) preset_cache = true;
-        else if (!std::strcmp(argv[i], "--dxil-sources") && i + 1 < argc) dxil_directory = argv[++i];
-        else usage = true;
-    }
-    if (usage) {
-        std::fprintf(stderr, "usage: shader_embed <output.bin> [--preset-cache] [--dxil-sources <directory>] [--prepare-keys]\n");
+    if (argc != 3 || std::strcmp(argv[1], "--dxil-sources") != 0) {
+        std::fprintf(stderr, "usage: shader_embed --dxil-sources <directory>\n");
         return 2;
     }
-    const std::string output = argv[1];
-    if (const char* store = std::getenv("EID3D11_SHADER_STORE"); store && *store) {
-        if (!identify_compiler()) {
-            std::fprintf(stderr, "shader_embed: cannot identify shader compiler DLL\n");
-            return 1;
-        }
-        g_store = store;
-        CreateDirectoryA(g_store.c_str(), nullptr);
-    }
-    LARGE_INTEGER frequency{}, begin{}, end{};
-    QueryPerformanceFrequency(&frequency);
-    QueryPerformanceCounter(&begin);
-
-    std::vector<unsigned char> previous;
-    {
-        std::ifstream in(output, std::ios::binary);
-        previous.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
-    }
-    if (!validate_shader_table(previous.data(), previous.size())) previous.clear();
-    // The previous table has no compiler identity. Only compiler-keyed store
-    // entries can be reused when the store is enabled.
-    if (!previous.empty() && g_store.empty()) use_embedded_shaders(previous.data(), previous.size());
-
     std::vector<ShaderProgram> programs;
     append_shader_groups(0xFFFFFFFFu, programs);
 #ifdef EID3D11_EMBEDDED
     // The embedded renderer's native specialisations may differ from the
-    // standalone DDraw cache (for example, the host triangle transform). Keep
-    // their exact bytecode in the EXE resource table so it needs no sidecar.
+    // standalone renderer. Export the matching keys together with the other DXIL variants.
     std::vector<NativeSpecialisedPrograms> embeddedSpecialisations;
     const auto keys = native_shipped_specialisation_keys();
     embeddedSpecialisations.reserve(keys.size());
@@ -498,198 +248,6 @@ int main(int argc, char** argv) {
         program.source = embeddedSources.back();
     }
 #endif
-    std::vector<std::pair<ShaderKey, std::string>> table(programs.size());
-    std::vector<std::string> errors(programs.size());
-    std::vector<double> seconds(programs.size(), 0.0);  // compile time of each compiled program
-    std::atomic<std::size_t> next{0}, compiled{0}, stored{0}, migrated{0}, missing{0};
-    // The slowest programs first (terrain pixel variants ~60 s, then the other
-    // native pixel programs ~5-15 s, then everything else), so no worker
-    // starts a minute-long compile at the end of the queue.
-    std::vector<std::size_t> queue_order(programs.size());
-    for (std::size_t i = 0; i < queue_order.size(); ++i) queue_order[i] = i;
-    const auto weight = [&](std::size_t i) {
-        const ShaderProgram& program = programs[i];
-        if (!std::strcmp(program.entry, "nativePS")) return define_value(program, "NATIVE_TERRAIN_PS") ? 0 : 1;
-        return std::strstr(program.entry, "PS") || std::strstr(program.entry, "CS") ? 2 : 3;
-    };
-    std::stable_sort(queue_order.begin(), queue_order.end(), [&](std::size_t a, std::size_t b) { return weight(a) < weight(b); });
-    const auto work = [&]() {
-        for (std::size_t n = next++; n < programs.size(); n = next++) {
-            const std::size_t i = queue_order[n];
-            const ShaderProgram& program = programs[i];
-            table[i].first = shader_key(program);
-            ShaderKey stored_key{}, legacy_key{};
-            const bool keyed = !g_store.empty() && compile_key(program, stored_key, legacy_key);
-            const void* code = nullptr;
-            std::size_t size = 0;
-            if (!prepare_keys && shader_cache_detail::find(table[i].first, code, size)) {
-                table[i].second.assign(static_cast<const char*>(code), size);
-                continue;
-            }
-            if (keyed && store_read(stored_key, table[i].second)) { ++stored; continue; }
-            if (keyed && store_read(legacy_key, table[i].second)) {
-                store_write(stored_key, table[i].second.data(), table[i].second.size());
-                std::string verified;
-                if (!store_read(stored_key, verified) || verified != table[i].second)
-                    errors[i] = program_label(program) + ": store migration write failed";
-                else ++migrated;
-                continue;
-            }
-            if (prepare_keys) { ++missing; continue; }
-            LARGE_INTEGER start{}, stop{};
-            QueryPerformanceCounter(&start);
-            Microsoft::WRL::ComPtr<ID3DBlob> blob, messages;
-            if (FAILED(D3DCompile(program.source.data(), program.source.size(), program.name, program.defines, nullptr,
-                                  program.entry, program.profile, program.flags, 0, &blob, &messages))) {
-                errors[i] = std::string(program.entry) + ": " +
-                            (messages ? static_cast<const char*>(messages->GetBufferPointer()) : "compile failed");
-                continue;
-            }
-            QueryPerformanceCounter(&stop);
-            seconds[i] = double(stop.QuadPart - start.QuadPart) / double(frequency.QuadPart);
-            table[i].second.assign(static_cast<const char*>(blob->GetBufferPointer()), blob->GetBufferSize());
-            if (keyed) store_write(stored_key, blob->GetBufferPointer(), blob->GetBufferSize());
-            ++compiled;
-        }
-    };
-    // This tool is built for x64; use the available logical processors.
-    const unsigned threads = std::max(std::thread::hardware_concurrency(), 1u);
-    std::vector<std::thread> workers;
-    for (unsigned t = 0; t < threads; ++t) workers.emplace_back(work);
-    for (auto& worker : workers) worker.join();
-
-    bool failed = false;
-    for (const auto& error : errors)
-        if (!error.empty()) { std::fprintf(stderr, "shader_embed: %s\n", error.c_str()); failed = true; }
-    if (failed) return 1;
-
-    std::printf("shader_embed: %zu programs, %zu migrated, %zu already stored, %zu missing (key preparation)\n",
-                programs.size(), migrated.load(), stored.load(), missing.load());
-    if (prepare_keys) return missing ? 1 : 0;
-    if (native_pixel_gate(programs, table)) return 1;
-    const std::vector<unsigned char> bytes = build_shader_table(std::move(table));
-    if (bytes != previous) {
-        std::ofstream out(output, std::ios::binary | std::ios::trunc);
-        out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
-        if (!out) { std::fprintf(stderr, "shader_embed: cannot write %s\n", output.c_str()); return 1; }
-    }
-    const std::string name = output.substr(output.find_last_of("\\/") + 1);
-    const std::string rc = output.substr(0, output.size() - (output.size() >= 4 ? 4 : 0)) + ".rc";
-    {
-        std::ofstream out(rc, std::ios::trunc);
-        out << "EID3D11_SHADERS RCDATA \"" << name << "\"\n";
-        if (!out) { std::fprintf(stderr, "shader_embed: cannot write %s\n", rc.c_str()); return 1; }
-    }
-    QueryPerformanceCounter(&end);
-    std::printf("shader_embed: %zu programs, %zu compiled, %zu reused (%zu from the store), %zu bytes, %.1f s\n",
-                programs.size(), compiled.load(), programs.size() - compiled.load(), stored.load(), bytes.size(),
-                double(end.QuadPart - begin.QuadPart) / double(frequency.QuadPart));
-    {
-        // The slowest compiles (the build-time budget's owners).
-        std::vector<std::size_t> order;
-        double total = 0;
-        for (std::size_t i = 0; i < programs.size(); ++i) if (seconds[i] > 0) { order.push_back(i); total += seconds[i]; }
-        std::sort(order.begin(), order.end(), [&](std::size_t x, std::size_t y) { return seconds[x] > seconds[y]; });
-        if (!order.empty())
-            std::printf("shader_embed: compile time %.1f s summed over %zu programs (%u workers); slowest:\n", total, order.size(), threads);
-        for (std::size_t n = 0; n < order.size() && n < 10; ++n)
-            std::printf("shader_embed:   %6.1f s %s\n", seconds[order[n]], program_label(programs[order[n]]).c_str());
-    }
-
-    append_d3d12_shader_programs(programs);  // the DXIL table only
-    if (!dxil_directory.empty() && write_dxil_sources(dxil_directory, programs)) return 1;
-    if (!preset_cache) return 0;
-    // --preset-cache (build-local-x86.cmd with EID3D11_PRESET_CACHE=1, for
-    // staged candidates and packages): the shipped presets' specialised
-    // native pixel programs, one DXBC file a
-    // program in eid3d11_shader_cache next to the table (staged next to the
-    // DLL; the renderer loads them on demand, renderer.cpp). A file whose name
-    // (its program key) exists is current; files of no current program are
-    // removed, so the folder holds exactly the shipped sets.
-    QueryPerformanceCounter(&begin);
-    const std::string directory = output.substr(0, output.find_last_of("\\/") + 1) + "eid3d11_shader_cache";
-    CreateDirectoryA(directory.c_str(), nullptr);
-    std::vector<NativeSpecialisedPrograms> lists;
-    for (const std::uint32_t key : native_shipped_specialisation_keys()) {
-        lists.emplace_back();
-        if (!native_specialised_programs(key, lists.back())) {
-            std::fprintf(stderr, "shader_embed: specialised list of key 0x%03x does not match its table\n", key);
-            return 1;
-        }
-    }
-    std::vector<const ShaderProgram*> special;
-    for (const auto& list : lists) for (const auto& program : list.programs) special.push_back(&program);
-    const auto file_of = [&](const ShaderProgram& program) {
-        const std::wstring name = native_spec_cache_file_name(shader_key(program));
-        std::string narrow;
-        for (const wchar_t ch : name) narrow += static_cast<char>(ch); // hex digits and ".dxbc"
-        return directory + "\\" + narrow;
-    };
-    std::vector<std::string> wanted(special.size()), special_errors(special.size());
-    std::atomic<std::size_t> special_next{0}, special_compiled{0}, special_stored{0};
-    const auto special_work = [&]() {
-        for (std::size_t i = special_next++; i < special.size(); i = special_next++) {
-            const ShaderProgram& program = *special[i];
-            wanted[i] = file_of(program);
-            ShaderKey key{}, legacy_key{};
-            const bool keyed = !g_store.empty() && compile_key(program, key, legacy_key);
-            if (!keyed && GetFileAttributesA(wanted[i].c_str()) != INVALID_FILE_ATTRIBUTES) {
-                continue;
-            }
-            if (keyed && CopyFileA(store_file(key).c_str(), wanted[i].c_str(), FALSE)) { ++special_stored; continue; }
-            std::string legacy_code;
-            if (keyed && store_read(legacy_key, legacy_code)) {
-                store_write(key, legacy_code.data(), legacy_code.size());
-                if (CopyFileA(store_file(key).c_str(), wanted[i].c_str(), FALSE)) { ++special_stored; continue; }
-                special_errors[i] = program_label(program) + ": store migration write failed";
-                continue;
-            }
-            Microsoft::WRL::ComPtr<ID3DBlob> blob, messages;
-            if (FAILED(D3DCompile(program.source.data(), program.source.size(), program.name, program.defines, nullptr,
-                                  program.entry, program.profile, program.flags, 0, &blob, &messages))) {
-                special_errors[i] = program_label(program) + ": " +
-                                    (messages ? static_cast<const char*>(messages->GetBufferPointer()) : "compile failed");
-                continue;
-            }
-            const std::string temporary = wanted[i] + ".tmp";
-            {
-                std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
-                out.write(static_cast<const char*>(blob->GetBufferPointer()), static_cast<std::streamsize>(blob->GetBufferSize()));
-                if (!out) { special_errors[i] = "cannot write " + temporary; continue; }
-            }
-            if (!MoveFileExA(temporary.c_str(), wanted[i].c_str(), MOVEFILE_REPLACE_EXISTING)) {
-                special_errors[i] = "cannot write " + wanted[i];
-                continue;
-            }
-            if (keyed) store_write(key, blob->GetBufferPointer(), blob->GetBufferSize());
-            ++special_compiled;
-        }
-    };
-    special_next = 0;
-    workers.clear();
-    // Preset compiles share this 32-bit process's address space. An input
-    // that failed in the 12-worker batch compiled alone; use the same
-    // bounded worker count as the general pass.
-    // Four here: these are all native pixel programs, the largest FXC inputs.
-    for (unsigned t = 0; t < (std::min)(threads, 4u); ++t) workers.emplace_back(special_work);
-    for (auto& worker : workers) worker.join();
-    for (const auto& error : special_errors)
-        if (!error.empty()) { std::fprintf(stderr, "shader_embed: %s\n", error.c_str()); failed = true; }
-    if (failed) return 1;
-    std::size_t removed = 0;
-    WIN32_FIND_DATAA found{};
-    const HANDLE search = FindFirstFileA((directory + "\\*").c_str(), &found);
-    if (search != INVALID_HANDLE_VALUE) {
-        do {
-            if (found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
-            const std::string path = directory + "\\" + found.cFileName;
-            if (std::find(wanted.begin(), wanted.end(), path) == wanted.end() && DeleteFileA(path.c_str())) ++removed;
-        } while (FindNextFileA(search, &found));
-        FindClose(search);
-    }
-    QueryPerformanceCounter(&end);
-    std::printf("shader_embed: %zu preset keys, %zu specialised programs, %zu compiled, %zu from the store, %zu removed, %.1f s\n",
-                lists.size(), special.size(), special_compiled.load(), special_stored.load(), removed,
-                double(end.QuadPart - begin.QuadPart) / double(frequency.QuadPart));
-    return 0;
+    append_d3d12_shader_programs(programs);
+    return write_dxil_sources(argv[2], programs);
 }

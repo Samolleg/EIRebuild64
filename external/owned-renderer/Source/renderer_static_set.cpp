@@ -267,6 +267,7 @@ HRESULT Renderer::bake_native_static_layout(NativeSubmissionLayout& layout) try{
   NativeSubmissionLayout::StaticBake::Batch totals;
   totals.first_record=native_pending_draws_[native_draw_order_[batch.first_draw]].record;
   totals.xy_min[0]=totals.xy_min[1]=std::numeric_limits<float>::max();totals.xy_max[0]=totals.xy_max[1]=-std::numeric_limits<float>::max();
+  totals.burn_xy_min[0]=totals.burn_xy_min[1]=std::numeric_limits<float>::max();totals.burn_xy_max[0]=totals.burn_xy_max[1]=-std::numeric_limits<float>::max();
   totals.liquid_xy_min[0]=totals.liquid_xy_min[1]=std::numeric_limits<float>::max();
   totals.liquid_xy_max[0]=totals.liquid_xy_max[1]=-std::numeric_limits<float>::max();
   const auto& bucket=native_state_buckets_[batch.state_bucket];
@@ -275,6 +276,9 @@ HRESULT Renderer::bake_native_static_layout(NativeSubmissionLayout& layout) try{
    const auto& draw=native_queued_draw(native_draw_order_[n]);
    totals.triangles+=draw.index_count/3u;
    for(int axis=0;axis<2;++axis){totals.xy_min[axis]=std::min(totals.xy_min[axis],draw.bounds_min[axis]);totals.xy_max[axis]=std::max(totals.xy_max[axis],draw.bounds_max[axis]);}
+   {float lo[2],hi[2];
+    if(native_draw_burn_xy(draw,lo,hi))for(int axis=0;axis<2;++axis){totals.burn_xy_min[axis]=std::min(totals.burn_xy_min[axis],lo[axis]);totals.burn_xy_max[axis]=std::max(totals.burn_xy_max[axis],hi[axis]);}
+    else totals.burn_unbounded=true;}
    if(draw.instance.lighting_enabled){++totals.lit_draws;totals.unlit=false;}
    if(bucket.semantic_kind==SemanticKind::terrain){totals.liquid|=draw.mesh->has_liquid;totals.ground|=draw.mesh->has_ground;totals.liquid_types|=draw.mesh->liquid_types;}
    if(bucket.semantic_kind==SemanticKind::terrain&&draw.mesh->has_liquid){
@@ -332,6 +336,32 @@ HRESULT Renderer::upload_native_static_work(NativeSubmissionLayout& layout){
  context_->UpdateSubresource(bake.work.Get(),0,&box,layout.work.data(),0,0);
  return S_OK;
 }
+
+// A failing static flush fails again every frame until its content changes:
+// one line per distinct failure (with the frames the previous one repeated),
+// one when the flushes succeed again. hr S_OK: a flush succeeded.
+void Renderer::report_static_flush_failure(HRESULT hr,bool terrain) noexcept try{
+ auto& last=static_flush_failure_last_[terrain?1:0];auto& repeats=static_flush_failure_repeats_[terrain?1:0];
+ if(SUCCEEDED(hr)){
+  if(last.empty())return;
+  char text[128];std::snprintf(text,sizeof(text),"set=%s after %llu failed flushes",terrain?"terrain+neighbours":"statics",
+   static_cast<unsigned long long>(repeats+1));
+  bridge_append_probe_event("static_flush_recovered",text);
+  last.clear();repeats=0;return;
+ }
+ char text[256];std::snprintf(text,sizeof(text),"set=%s hr=%08lx refused=%s demand=%llu limit=%llu flush_line=%d",
+  terrain?"terrain+neighbours":"statics",static_cast<unsigned long>(hr),native_layout_refusal_?native_layout_refusal_:"-",
+  static_cast<unsigned long long>(native_layout_refusal_?native_layout_refusal_count_:0),
+  static_cast<unsigned long long>(native_layout_refusal_?native_layout_refusal_limit_:0),native_flush_failure_line_);
+ if(last==text){++repeats;return;}
+ std::string line=text;
+ if(!last.empty()){
+  char previous[64];std::snprintf(previous,sizeof(previous)," (previous failure %llu flushes)",static_cast<unsigned long long>(repeats+1));
+  line+=previous;
+ }
+ bridge_append_probe_event("static_flush_failed",line.c_str());
+ last=text;repeats=0;
+}catch(...){}
 
 HRESULT Renderer::flush_native_static_terrain(const FixedState& frame,const std::array<float,16>& world_to_clip){SCENE_ENTRY("flush_native_static_terrain");
  if(native_shadow_collecting_)return E_FAIL;

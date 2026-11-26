@@ -16,6 +16,7 @@
 #include <map>
 #include <optional>
 #include <stdexcept>
+#include <thread>
 #include <tuple>
 #include <unordered_map>
 
@@ -1787,6 +1788,38 @@ struct WorldMapPreview::Impl {
   std::vector<std::size_t> active;
   std::string cache_failure, binding_failure;
   bool cache_reused = false;
+  // The loading cache is prepared on its own thread (#309: every reachable
+  // zone took 25-40 s on a 4-thread CPU inside one host command, and the
+  // game declared the host lost after 20 s). poll() adopts the result; an
+  // activation that arrives first waits in activation_* and reads as
+  // loading ("Preparing world map previews...") until then.
+  struct Build {
+    std::atomic<bool> stop{false}, done{false};
+    WorldMapPreviewSpace space = WorldMapPreviewSpace::section_fitted;
+    ResourceStoreConfig mounts;
+    std::vector<WorldMapPreviewSection> descriptions;
+    std::unique_ptr<Cache> cache; // null: the build failed as a whole
+    std::string failure;
+    std::thread thread;
+  };
+  std::unique_ptr<Build> build;
+  bool activation_pending = false;
+  WorldMapPreviewSpace activation_space = WorldMapPreviewSpace::section_fitted;
+  std::vector<WorldMapPreviewSection> activation_sections;
+  // Stops a running build (it ends within the section it is preparing) and
+  // drops its result.
+  void cancel_build() noexcept {
+    if (!build)
+      return;
+    build->stop = true;
+    if (build->thread.joinable())
+      build->thread.join();
+    build.reset();
+  }
+  bool bind(WorldMapPreviewSpace space,
+            const std::vector<WorldMapPreviewSection> &sections,
+            std::string &failure) noexcept;
+  ~Impl() { cancel_build(); }
 };
 WorldMapPreview::WorldMapPreview() : impl_(std::make_unique<Impl>()) {}
 WorldMapPreview::~WorldMapPreview() = default;
@@ -1799,10 +1832,13 @@ void WorldMapPreview::set_enabled(bool value) noexcept {
 void WorldMapPreview::deactivate() noexcept {
   impl_->active.clear();
   impl_->binding_failure.clear();
+  impl_->activation_pending = false;
+  impl_->activation_sections.clear();
 }
 void WorldMapPreview::release() noexcept {
   deactivate();
   impl_->enabled = false;
+  impl_->cancel_build();
   impl_->cache.reset();
   impl_->cache_failure.clear();
   impl_->cache_reused = false;
@@ -1816,26 +1852,65 @@ bool same_section(const WorldMapPreviewSection &a,
          a.figure_shape == b.figure_shape &&
          a.unknown_texture_resource == b.unknown_texture_resource;
 }
+bool same_inputs(WorldMapPreviewSpace space, const ResourceStoreConfig &mounts,
+                 const std::vector<WorldMapPreviewSection> &descriptions,
+                 WorldMapPreviewSpace other_space,
+                 const ResourceStoreConfig &other_mounts,
+                 const std::vector<WorldMapPreviewSection> &other) {
+  return space == other_space &&
+         mounts.loose_roots == other_mounts.loose_roots &&
+         mounts.archives == other_mounts.archives &&
+         mounts.archive_kinds == other_mounts.archive_kinds &&
+         descriptions.size() == other.size() &&
+         std::equal(descriptions.begin(), descriptions.end(), other.begin(),
+                    same_section);
+}
 } // namespace
+void WorldMapPreview::poll() noexcept {
+  auto &build = impl_->build;
+  if (!build || !build->done)
+    return;
+  build->thread.join();
+  if (build->cache)
+    impl_->cache = std::move(build->cache);
+  else
+    impl_->cache_failure = build->failure;
+  build.reset();
+  if (impl_->activation_pending) {
+    impl_->activation_pending = false;
+    std::string failure;
+    if (!impl_->cache_failure.empty())
+      impl_->binding_failure = impl_->cache_failure;
+    else if (!impl_->bind(impl_->activation_space, impl_->activation_sections,
+                          failure))
+      bridge_report_event("world_map_preview_failed", failure.c_str());
+    impl_->activation_sections.clear();
+  }
+}
 bool WorldMapPreview::precache_loading(
     std::uint64_t generation, WorldMapPreviewSpace space,
     ResourceStoreConfig mounts, std::vector<WorldMapPreviewSection> sections,
     std::string &failure) noexcept {
   deactivate();
   impl_->cache_reused = false;
+  poll();
   try {
     if (!failure.empty())
       throw std::runtime_error(failure);
     require(generation != 0, "Missing preview cache generation");
     require(!sections.empty() && sections.size() <= 65535,
             "Invalid loading-screen section count");
-    if (impl_->cache && impl_->cache->space == space &&
-        impl_->cache->mounts.loose_roots == mounts.loose_roots &&
-        impl_->cache->mounts.archives == mounts.archives &&
-        impl_->cache->mounts.archive_kinds == mounts.archive_kinds &&
-        impl_->cache->descriptions.size() == sections.size() &&
-        std::equal(sections.begin(), sections.end(),
-                   impl_->cache->descriptions.begin(), same_section)) {
+    if (impl_->build &&
+        same_inputs(space, mounts, sections, impl_->build->space,
+                    impl_->build->mounts, impl_->build->descriptions)) {
+      // The same catalog is still being prepared: it lands in a later poll.
+      bridge_report_event("world_map_preview_cache_building",
+                          sections.front().zone.c_str());
+      return true;
+    }
+    if (impl_->cache &&
+        same_inputs(space, mounts, sections, impl_->cache->space,
+                    impl_->cache->mounts, impl_->cache->descriptions)) {
       // Same descriptions and mounts: a section that failed to prepare fails
       // again from the same data, so its cached failure is reused as well.
       impl_->cache_reused = true;
@@ -1848,10 +1923,25 @@ bool WorldMapPreview::precache_loading(
         }
       return true;
     }
-    // One loading cache: release the previous CPU owners before allocating the
+    // One loading cache: release the previous CPU owners before preparing the
     // next one. Expired GPU owners retire through the existing renderer path.
+    impl_->cancel_build();
     impl_->cache.reset();
     impl_->cache_failure.clear();
+    auto build = std::make_unique<Impl::Build>();
+    build->space = space;
+    build->mounts = mounts;
+    build->descriptions = sections;
+    Impl::Build *const job = build.get();
+    // The preparation runs on its own thread (the same decoders the neighbour
+    // stream runs off the render thread); the host keeps serving commands.
+    job->thread = std::thread([job, generation, space, mounts = std::move(mounts),
+                               sections = std::move(sections)]() mutable noexcept {
+    // Below the render and stream threads: on a 4-thread CPU the loading
+    // picture and the game's own load keep their cores.
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+    std::string failure;
+    try {
     auto cache = std::make_unique<Impl::Cache>();
     cache->space = space;
     cache->mounts = mounts;
@@ -1863,8 +1953,8 @@ bool WorldMapPreview::precache_loading(
     ResourceFailure error;
     if (!store.open(mounts, error) || !loader.start(1, error))
       throw std::runtime_error(error.message);
-    const std::atomic<bool> stop{false};
-    for (std::size_t i = 0; i < cache->descriptions.size(); ++i) {
+    const std::atomic<bool> &stop = job->stop;
+    for (std::size_t i = 0; i < cache->descriptions.size() && !stop; ++i) {
       const auto &description = cache->descriptions[i];
       try {
         auto made = prepare(generation, std::uint32_t(i), space, store, loader,
@@ -1949,8 +2039,23 @@ bool WorldMapPreview::precache_loading(
       }
     }
     loader.shutdown();
-    impl_->cache = std::move(cache);
-    return failure.empty();
+    job->cache = std::move(cache);
+    } catch (const std::exception &e) {
+      failure = e.what();
+      job->cache.reset();
+    } catch (...) {
+      failure = "World map preview: loading cache preparation failed";
+      job->cache.reset();
+    }
+    if (!job->stop)
+      bridge_report_event(failure.empty() ? "world_map_preview_cache_ready"
+                                          : "world_map_preview_cache_failed",
+                          failure.c_str());
+    job->failure = std::move(failure);
+    job->done = true;
+    });
+    impl_->build = std::move(build);
+    return true;
   } catch (const std::exception &e) {
     failure = e.what();
     impl_->cache.reset();
@@ -1965,11 +2070,37 @@ bool WorldMapPreview::contains(WorldMapPreviewSpace space,const std::vector<Worl
     return std::any_of(cached.begin(),cached.end(),[&](const auto& d){return same_section(section,d);});
   });
 }
+bool WorldMapPreview::Impl::bind(
+    WorldMapPreviewSpace space,
+    const std::vector<WorldMapPreviewSection> &sections,
+    std::string &failure) noexcept {
+  try {
+    require(cache && cache->space == space,
+            "World map previews were not baked during loading; reload the save");
+    for (const auto &section : sections) {
+      const auto &descriptions = cache->descriptions;
+      const auto found = std::find_if(
+          descriptions.begin(), descriptions.end(),
+          [&](const auto &cached) { return same_section(section, cached); });
+      require(
+          found != descriptions.end(),
+          "World map section was not baked during loading; reload the save");
+      active.push_back(std::size_t(found - descriptions.begin()));
+    }
+    return true;
+  } catch (const std::exception &e) {
+    failure = e.what();
+    active.clear();
+    binding_failure = failure;
+    return false;
+  }
+}
 bool WorldMapPreview::activate(std::uint64_t generation,
                                WorldMapPreviewSpace space,
                                std::vector<WorldMapPreviewSection> sections,
                                std::string &failure) noexcept {
   deactivate();
+  poll();
   if (!enabled())
     return true;
   try {
@@ -1978,22 +2109,16 @@ bool WorldMapPreview::activate(std::uint64_t generation,
     require(generation != 0, "Missing preview binding generation");
     require(!sections.empty() && sections.size() <= 15,
             "Invalid native section count");
+    if (impl_->build && impl_->build->space == space) {
+      // Still preparing: bound when the cache lands (poll); loading till then.
+      impl_->activation_pending = true;
+      impl_->activation_space = space;
+      impl_->activation_sections = std::move(sections);
+      return true;
+    }
     if (!impl_->cache_failure.empty())
       throw std::runtime_error(impl_->cache_failure);
-    require(
-        impl_->cache && impl_->cache->space == space,
-        "World map previews were not baked during loading; reload the save");
-    for (const auto &section : sections) {
-      const auto &descriptions = impl_->cache->descriptions;
-      const auto found = std::find_if(
-          descriptions.begin(), descriptions.end(),
-          [&](const auto &cached) { return same_section(section, cached); });
-      require(
-          found != descriptions.end(),
-          "World map section was not baked during loading; reload the save");
-      impl_->active.push_back(std::size_t(found - descriptions.begin()));
-    }
-    return true;
+    return impl_->bind(space, sections, failure);
   } catch (const std::exception &e) {
     failure = e.what();
     impl_->active.clear();
@@ -2019,6 +2144,11 @@ WorldMapPreviewStatus WorldMapPreview::status(std::size_t section) const {
     return {};
   if (!impl_->binding_failure.empty())
     return {WorldMapPreviewState::failed, impl_->binding_failure};
+  if (impl_->activation_pending)
+    return section < impl_->activation_sections.size()
+               ? WorldMapPreviewStatus{WorldMapPreviewState::loading, {}}
+               : WorldMapPreviewStatus{WorldMapPreviewState::failed,
+                                       "Preview section index out of range"};
   if (!impl_->cache)
     return {};
   if (section >= impl_->active.size())

@@ -3153,7 +3153,18 @@ BOOL CWorldClient::Draw()
         OwnedRender::E3CombatBeginFrame(IsCombatPause() || IWorld.IsMissionCombatPause());
         coreParts.Stage(CorePerf::WorldRender);
         auto completed = std::make_shared<owned::RetainedVisualFrame>();
-        owned::bridge_sample_embedded_visuals(visuals.time, visuals.briefingScreen,
+        const bool alt = !visuals.briefingScreen && owned::bridge_embedded_alt_enabled() && theInterface.IsAltDown();
+        std::vector<std::int32_t> usableObjects;
+        if (alt) {
+            POSITION pos = objList.GetHeadPosition();
+            while (pos) {
+                auto* object = objList.GetNext(pos);
+                if (object && object->IsScientific() && !object->IsScientificDoor())
+                    usableObjects.push_back(object->GetID());
+            }
+            std::sort(usableObjects.begin(), usableObjects.end());
+        }
+        owned::bridge_sample_embedded_visuals(visuals.time, visuals.briefingScreen, alt, std::move(usableObjects),
             visuals.hoverId, visuals.hoverSerial, *completed);
         if (OwnedRender::E1CompleteVisualFrame(*completed)) {
             OwnedRender::E1PublishGroundCoverFootprints(completed, visuals.footprints, visuals.footprintsEnabled);

@@ -24,7 +24,7 @@ enum class HarnessVerb : std::uint8_t {
     console,       // console <text>: the game's console parser; walk <x> <y> issues @MoveToPoint(GetLeader(),x,y)
     quit,          // the game's own QuitProgram
     pause,         // pause on|off: the game's mission pause, set (not toggled)
-    godmode,       // godmode on|off: the GodMode script flag of player 0
+    godmode,       // godmode on|off: immediate protection of the local party
     wait_ready,    // wait_ready [seconds]: loaded world fully prepared by the renderer
     main_menu,     // the game's own return to the main menu, from any screen
     note,          // note <text>: the harness banner ('|' starts a line) and window title
@@ -52,6 +52,31 @@ enum class HarnessVerb : std::uint8_t {
     open_outfitting,
     outfit_equip,
     scroll_items,
+    // camera_unit <id> <yaw> <pitch> <distance>: the camera pivot and game
+    // camera distance corrected, one step a world view, until the unit's
+    // position (the id dump_units lists) projects to the screen centre at
+    // that yaw and pitch with the eye <distance> metres from it. @x,y in
+    // place of the id: the unit nearest that world position (within 6 m),
+    // for spawned units whose id differs every run.
+    // id: frames (as int32); yaw pitch distance: number[0..2].
+    camera_unit,
+    // drawall on|off: the game's DrawVisibleOnly setting off (every unit is
+    // drawn and published, not only those the party sees) / back to the
+    // value the first drawall on found. frames: 1 on, 0 off.
+    drawall,
+    // Append verbs: existing ordinals are also used by the x64 host wire.
+    camera_hero,   // camera hero [yaw pitch zoom]: native party-leader follow
+    expect_godmode,
+    expect_hero_in_view,
+    expect_event_absent,
+    expect_event_present,
+    expect_value,  // expect value <diagnostic name> <op> <number>
+    // spawn <prototype | "prototype with spaces"> <x> <y> [yaw=deg] [player=N]
+    //       [model=mask] [prim=texture] [sec=texture]: a unit placed as the
+    // map loader places one (a CMEUnit through CWorldServer::AddMapObject).
+    // name: prototype; number[0..2]: x y yaw; frames: player;
+    // value: "model\nprim\nsec" (empty: the database default).
+    spawn,
 };
 
 struct HarnessCommand {
@@ -59,8 +84,9 @@ struct HarnessCommand {
     float number[5]{};   // camera: x y yaw pitch zoom; clock: hour; profile: seconds
     std::uint32_t frames = 0;  // wait: presents; pause/godmode: 1 on, 0 off; wait_ready: seconds
     std::string name;    // screenshot stem, config key, save selector or console text
-    std::string value;   // config value
+    std::string value;   // config value; expect value: the operator (== != < <= > >=)
     std::string error;   // why an invalid line was rejected
+    double expected = 0; // expect value: the parsed finite number
 };
 
 // Blank lines and lines starting with '#' are skipped without a result.

@@ -145,10 +145,10 @@ FurCorner furLoadCorner(uint tri,uint corner,float3 forward){
  // world vertices, same slot, same source vertex and part; nativeMotionVS).
  c.dp=0;
  [branch]if(furMotion!=0){
-  NativeWorldVertex b=nativePreviousWorldVertices[furPreparedBase+index];
+  NativeMotionVertex b=nativePreviousWorldVertices[furPreparedBase+index];
   // Only a vertex rewritten this frame carries the stamp in nativeMotionClock.z (storeNativeWorldVertex).
   uint stamp=asuint(nativeMotionClock.z);
-  if(b.specular==stamp&&b.sourcePosition==w.sourcePosition&&b.partNode==w.partNode)c.dp=b.p.xyz-w.p.xyz;
+  if(b.stamp==stamp&&b.identity==nativeMotionIdentity(w))c.dp=b.p-w.p.xyz;
  }
  return c;
 }

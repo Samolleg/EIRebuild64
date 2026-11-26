@@ -158,7 +158,9 @@ Renderer::native_static_set_for_layout(unsigned slot) noexcept {
   if (slot == 3)
     return &native_terrain_set_;
   if (slot == 4)
-    return &neighbours_.opaque;
+    return &neighbours_.opaque[0];
+  if (slot >= kNeighbourChunkLayout && slot < kNeighbourChunkLayout + kNeighbourChunks - 1)
+    return &neighbours_.opaque[1 + slot - kNeighbourChunkLayout];
   if (slot >= kMapOpaqueLayout && slot < kMapOrderedLayout)
     return &map_preview_opaque_[slot - kMapOpaqueLayout];
   if (slot >= kMapOrderedLayout && slot < kMapOrderedLayout + kMapPreviewSections)
@@ -289,12 +291,12 @@ void Renderer::precache_world_map_preview(
     world_map_preview_.release();
   embedded_world_map_preview_sources_ = sources;
 #endif
-  const bool ready = world_map_preview_.precache_loading(
-      generation, WorldMapPreviewSpace::section_fitted, std::move(mounts),
-      std::move(sections), failure);
-  bridge_report_event(ready ? "world_map_preview_cache_ready"
-                            : "world_map_preview_cache_failed",
-                      failure.c_str());
+  // Starts the preparation on its own thread (#309); the cache_ready /
+  // cache_failed event follows when it lands.
+  if (!world_map_preview_.precache_loading(
+          generation, WorldMapPreviewSpace::section_fitted, std::move(mounts),
+          std::move(sections), failure))
+    bridge_report_event("world_map_preview_cache_failed", failure.c_str());
 }
 
 void Renderer::activate_world_map_preview(
@@ -388,6 +390,7 @@ void Renderer::draw_world_map_preview(std::uint64_t generation,
   if (generation != world_map_preview_generation_ ||
       section >= world_map_preview_reasons_.size())
     return;
+  world_map_preview_.poll();
   const auto status = world_map_preview_.status(section);
   std::string failure;
   if (status.state == WorldMapPreviewState::loading)
@@ -525,6 +528,46 @@ void Renderer::draw_world_map_preview(std::uint64_t generation,
         [](const auto &reason) { return !reason.empty(); });
     debug_overlay_.set_world_map_notice(
         pending == world_map_preview_reasons_.end() ? std::string{} : *pending);
+  }
+}
+
+
+// #268: what the world map shows, once per opening of the map screen (its
+// first zone hit-test frame without the world camera): the option, and
+// per section whether its preview was baked during the load.
+void Renderer::report_world_map_previews() noexcept {
+  try {
+    std::string detail;
+    if (!configured_boolean(debug_overlay_.config(), "world_map_previews", false))
+      detail = "option off: the game's own map, no previews";
+    else if (!world_map_preview_generation_)
+      detail = "option on, but no previews were prepared for this load (the option was off at the load, or its load hooks did not run)";
+    else {
+      unsigned ready = 0, loading = 0, failed = 0, off = 0;
+      std::string missing;
+      for (std::size_t i = 0; i < world_map_preview_reasons_.size(); ++i) {
+        const auto status = world_map_preview_.status(i);
+        const char *state = "off";
+        switch (status.state) {
+        case WorldMapPreviewState::ready: ++ready; continue;
+        case WorldMapPreviewState::loading: ++loading; state = "loading"; break;
+        case WorldMapPreviewState::failed: ++failed; state = "failed"; break;
+        case WorldMapPreviewState::disabled: ++off; break;
+        }
+        missing += " section " + std::to_string(i) + " " + state;
+        if (!status.reason.empty()) missing += " (" + status.reason + ")";
+        missing += ";";
+      }
+      char head[192];
+      std::snprintf(head, sizeof(head),
+                    "option on, load %llu: %u of %zu sections baked, %u loading, %u failed, %u off",
+                    static_cast<unsigned long long>(world_map_preview_generation_), ready,
+                    world_map_preview_reasons_.size(), loading, failed, off);
+      detail = head;
+      if (!missing.empty()) detail += "; missing:" + missing;
+    }
+    bridge_report_event("world_map_previews_at_open", detail.c_str());
+  } catch (...) {
   }
 }
 } // namespace owned

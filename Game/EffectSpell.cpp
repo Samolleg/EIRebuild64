@@ -188,6 +188,10 @@ bool CEffectSpell::ReadVisualFireSpell(owned::RetainedFireSpell& output) const n
         output.kind = 2;
         const auto* wall = static_cast<const CEffectWall*>(pEffect.GetPtr());
         output.wall = {wall->ptWallDirection.x, wall->ptWallDirection.y};
+    } else if (kind == 7 && nTimeLeft >= 0 && !pEffect.IsEmpty() && pEffect->WhoAmI() == HPC_EFFECTLIGHTNING) {
+        const auto* bolt = static_cast<const CEffectLightning*>(pEffect.GetPtr());
+        output.kind = 4;
+        output.wall = {(bolt->ptDst.x - bolt->ptSrc.x) * .5f, (bolt->ptDst.y - bolt->ptSrc.y) * .5f};
     } else return false;
     output.center = {cp.x, cp.y, cp.z};
     output.radius = spell.GetRadius();

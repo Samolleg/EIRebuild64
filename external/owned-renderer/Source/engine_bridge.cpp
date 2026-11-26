@@ -416,6 +416,16 @@ constexpr std::size_t kCameraYawOrientationOffset = 0x0f4;
 constexpr std::uint32_t kCameraMousePitchCallRva = 0x001eb335;
 constexpr std::uint32_t kCameraSetPitchValueRva = 0x0000f3c0;
 constexpr std::size_t kCameraMousePitchCallBytes = 5;
+// CI3DHandlerNewCamera::OnMouseMove: with the right button held, Ctrl or Alt
+// turns mouse rotation into scrolling. The Alt test is MOV CL,[EAX+7E]
+// (CInterface3D::bAltDown); TEST CL,CL; JNZ scroll, right after the Ctrl test
+// (+7C) and 0x48 bytes before the yaw call (base 5EB25C, LiA 526CE8). Alt is
+// the interact highlight's key (#315), so that JNZ becomes a 6-byte NOP
+// while the owned mouse rotation hooks are installed: RMB rotates with Alt
+// held, Ctrl still scrolls.
+constexpr std::uint32_t kCameraAltScrollSiteRva = 0x001eb25c;
+struct CameraAltScrollTest { std::uint32_t rva; std::array<std::uint8_t, 11> bytes; };
+constexpr std::array<std::uint8_t, 6> kCameraAltScrollNop{{0x66,0x0f,0x1f,0x44,0x00,0x00}};
 // 5EB310/5EB316 read the input settings loaded at WinMain. These globals
 // feed the RMB caller even when camera mode uses a different settings object.
 constexpr std::uint32_t kCameraPitchInputRva = 0x001eb310;
@@ -688,14 +698,16 @@ struct WorldEnvironmentContract {
     std::uint32_t sky_call, sky_draw, sky_gate, light_table, light_manager_table;
     std::array<std::uint8_t,12> sky_gate_stock;
     std::uint32_t torch_table, torch_specific_table;
+    // CLeverObject vtable (base ctor 0x52B1F0 stores 0x73E740).
+    std::uint32_t lever_table;
 };
 const WorldEnvironmentContract& world_environment_contract() noexcept {
     static constexpr WorldEnvironmentContract base{kSkyDrawCallRva,kSkyObjectDrawRva,kWorldSkyGateRva,
         0x00343afc,0x00343b50,{{0x8b,0x45,0x08,0xf6,0xc4,0x10,0x0f,0x84,0xbb,0,0,0}},
-        0x0033e834,0x0033e954};
+        0x0033e834,0x0033e954,0x0033e740};
     static constexpr WorldEnvironmentContract lia{kLiaSkyCallRva,kLiaSkyDrawRva,kLiaSkyGateRva,
         kLiaLightTableRva,kLiaLightManagerTableRva,kLiaSkyGateStock,
-        kLiaTorchTableRva,kLiaTorchSpecificTableRva};
+        kLiaTorchTableRva,kLiaTorchSpecificTableRva,kLiaLeverTableRva};
     return running_game_sites().report.engine == GameEngine::lia ? lia : base;
 }
 
@@ -962,6 +974,7 @@ struct State {
     HANDLE wake = nullptr;
     std::vector<Entry> queue;
     std::size_t queued_bytes = 0;
+    bool writing = false;  // the writer thread holds a batch it has not finished writing
     State() { InitializeCriticalSection(&lock); wake = CreateEventW(nullptr, FALSE, FALSE, nullptr); }
 };
 State& state() { static State* value = new State; return *value; }  // never destroyed: lines may arrive during exit
@@ -988,6 +1001,7 @@ DWORD WINAPI writer(void*) {
         WaitForSingleObject(s.wake, 250);
         EnterCriticalSection(&s.lock);
         batch.swap(s.queue);
+        s.writing = !batch.empty();
         s.queued_bytes = 0;
         LeaveCriticalSection(&s.lock);
         for (const Entry& entry : batch) {
@@ -1002,6 +1016,9 @@ DWORD WINAPI writer(void*) {
             WriteFile(file, entry.bytes.data(), static_cast<DWORD>(entry.bytes.size()), &written, nullptr);
         }
         batch.clear();
+        EnterCriticalSection(&s.lock);
+        s.writing = false;
+        LeaveCriticalSection(&s.lock);
     }
 }
 void append(std::wstring path, std::string bytes) noexcept {
@@ -1057,6 +1074,18 @@ std::wstring widen(const std::string& text) {
 } // namespace async_log
 
 void bridge_async_drain() noexcept { async_log::drain(); }
+void bridge_async_flush(unsigned timeout_ms) noexcept {
+    auto& s = async_log::state();
+    const ULONGLONG deadline = GetTickCount64() + timeout_ms;
+    for (;;) {
+        EnterCriticalSection(&s.lock);
+        const bool idle = s.queue.empty() && !s.writing;
+        LeaveCriticalSection(&s.lock);
+        if (idle || GetTickCount64() >= deadline) return;
+        SetEvent(s.wake);
+        Sleep(5);
+    }
+}
 void bridge_async_append(const wchar_t* path, const char* bytes, std::size_t size) noexcept {
     if (!path || !bytes || !size) return;
     try { async_log::append(path, std::string(bytes, size)); } catch (...) {}
@@ -2871,6 +2900,7 @@ std::array<std::uint8_t, kCameraMouseYawCallBytes> g_camera_mouse_yaw_original{}
 bool g_camera_mouse_yaw_installed = false;
 std::array<std::uint8_t, kCameraMousePitchCallBytes> g_camera_mouse_pitch_original{};
 bool g_camera_mouse_pitch_installed = false;
+bool g_camera_alt_rotate_installed = false;
 std::array<std::uint8_t, kGlobalMapHitTestCallBytes> g_global_map_hit_test_original{};
 std::uint8_t* g_global_map_hit_test_image = nullptr;
 std::array<std::uint8_t, 5> g_camera_mouse_normalize_original{};
@@ -3303,7 +3333,8 @@ bool hook_entry_usable(const std::uint8_t* entry, const std::uint8_t* stock,
 bool restore_forwarding_hook(std::uint8_t* entry,const std::uint8_t* original,
     std::size_t bytes,const void* hook,bool call,const char* owner) noexcept;
 bool visual_object_id(void* object, std::int32_t& id) noexcept;
-void publish_highlight_state() noexcept;
+bool highlight_alt_held() noexcept;
+void publish_highlight_state(bool alt, const std::vector<std::int32_t>& alt_objects) noexcept;
 void visual_note_appearance(void* object, bool materials_changed = false,
                             bool textures_changed = false,
                             OuterFrameAppearanceCallback callback = OuterFrameAppearanceCallback::unknown) noexcept;
@@ -8416,6 +8447,8 @@ bool read_owned_portrait_hair(void* figure, const std::string& model, std::int32
 }
 
 bool portrait_model_resource(const std::string& model, ResourceBlob& blob) noexcept;
+// A texture file by its full name (the bare hair's base skin layer; game thread).
+bool portrait_texture_resource(const std::string& name, ResourceBlob& blob) noexcept;
 // The neutral and expression face pictures in one resolution (game thread).
 bool portrait_face_pictures(const std::string& neutral, const std::string& expression,
     std::shared_ptr<const TextureCpuAsset>& neutral_texture,
@@ -8544,7 +8577,7 @@ bool submit_owned_portrait(void* renderer, void* figure, void* material, BYTE fo
                     const std::string reference = sample.assembly->skeleton->visual_reference;
                     slot_cache.bare = build_owned_portrait_bare_assembly(*sample.assembly,
                         [&reference](ResourceBlob& model) { return portrait_model_resource(reference, model); },
-                        portrait_hair, bare_reason);
+                        portrait_texture_resource, portrait_hair, bare_reason);
                 }
                 if (!slot_cache.bare) report_owned_portrait_failure(bare_reason);
             }
@@ -8805,6 +8838,70 @@ ObjectPlanExecutionStatus execute_owned_object_render_plan(
         auto& scene = retained_visual_scene();
         if (scene.visual_claims_mesh(identity))
             return fail("owned_scene_sample_missing");
+    }
+    // A world object taking the per-figure path below: in core mode the
+    // D3D12 host omits those packets (#287: a whole zone3obr world went
+    // this way). Say why, once per world epoch for the frame-level reasons
+    // and for the first 16 unclaimed objects (id and figure name).
+    if (g_scene_3d_depth && !preview_route && scene_core_renderer()) {
+        static std::uint64_t logged_epoch = ~0ull;
+        static unsigned logged_frame_reasons = 0, logged_objects = 0;
+        static std::array<std::int32_t, 16> logged_ids{};
+        const std::uint64_t epoch = bridge_current_world_epoch();
+        if (epoch != logged_epoch) { logged_epoch = epoch; logged_frame_reasons = 0; logged_objects = 0; }
+        const bool id_logged = std::find(logged_ids.begin(), logged_ids.begin() + logged_objects,
+                                         identity.id) != logged_ids.begin() + logged_objects;
+        const auto& world = g_owned_visual_world_frame;
+        const unsigned reason = !world.active ? 1u : !world.shadow_ready ? 2u : 0u;
+        char detail[256]{};
+        if (reason && !(logged_frame_reasons & reason)) {
+            logged_frame_reasons |= reason;
+            _snprintf_s(detail, sizeof(detail), _TRUNCATE,
+                "world_epoch=%llu reason=%s (every world object this frame) first id=%d",
+                static_cast<unsigned long long>(epoch),
+                reason == 1u ? "world_frame_inactive" : "world_frame_not_ready", static_cast<int>(identity.id));
+            append_bridge_event("owned_object_per_figure", detail, true);
+        } else if (!reason && !id_logged && logged_objects < logged_ids.size()) {
+            // Once per distinct object, with the retained scene's account of
+            // why it holds no owned mesh (#302: one unit drew per figure).
+            logged_ids[logged_objects++] = identity.id;
+            const char* name = nullptr; std::size_t length = 0;
+            if (plan->parts.empty() || !read_figure_name(plan->parts[0].figure, name, length)) { name = "-"; length = 1; }
+            std::string scene_state;
+            try {
+                const auto resource = retained_visual_scene().visual_resource(identity.id);
+                scene_state = resource.serial ? retained_visual_scene().visual_preview_diagnosis(resource) : "no_resource";
+                if (scene_state.empty()) scene_state = "complete";
+            } catch (...) { scene_state = "unreadable"; }
+            char model[64]{};
+            read_pick_model_mask(specific, model, sizeof(model));
+            // The frame's sample with this id, whatever its lifecycle: an id
+            // match with another generation/epoch means the draw call's
+            // identity, not the mesh, failed the claim.
+            char sample_state[192] = "sample=none";
+            if (world.values) {
+                const auto& entities = world.values->entities;
+                const auto found = std::lower_bound(entities.begin(), entities.end(), identity.id,
+                    [](const RetainedVisualSample& item, std::int32_t id) { return item.lifecycle.id < id; });
+                if (found != entities.end() && found->lifecycle.id == identity.id) {
+                    const auto index = static_cast<std::size_t>(found - entities.begin());
+                    _snprintf_s(sample_state, sizeof(sample_state), _TRUNCATE,
+                        "sample_generation=%llu sample_epoch=%llu call_epoch=%llu declared=%d claimed=%d",
+                        static_cast<unsigned long long>(found->lifecycle.generation),
+                        static_cast<unsigned long long>(found->lifecycle.positive_world_epoch),
+                        static_cast<unsigned long long>(identity.positive_world_epoch),
+                        found->mesh_declared ? 1 : 0,
+                        index < world.prepared.size() && world.prepared[index].claimed ? 1 : 0);
+                }
+            }
+            char wide[768]{};
+            _snprintf_s(wide, sizeof(wide), _TRUNCATE,
+                "world_epoch=%llu reason=unclaimed id=%d generation=%llu figure=%.*s model=%s parts=%u %s scene: %s",
+                static_cast<unsigned long long>(epoch), static_cast<int>(identity.id),
+                static_cast<unsigned long long>(identity.generation), static_cast<int>((std::min)(length, std::size_t(64))), name,
+                model[0] ? model : "-", static_cast<unsigned>(plan->parts.size()), sample_state, scene_state.c_str());
+            append_bridge_event("owned_object_per_figure", wide, true);
+        }
     }
     if (!g_native_sink_context || !g_native_sink_submit ||
         !g_native_sink_begin_object || !g_native_sink_end_object)
@@ -9895,6 +9992,7 @@ bool visual_publish_appearance(void* object, const VisualAppearanceChanges* chan
     const char** predicate = nullptr,
     OuterFrameAppearanceCallback callback = OuterFrameAppearanceCallback::unknown) noexcept;
 bool retained_current_object_type(void* object, std::uint32_t& type) noexcept;
+bool visual_object_ground_contact(const void* object) noexcept;
 bool visual_publish_unit_values(void* object, const float* packet_rate,
                                 const float* tick_fade, bool* completed_stun_end = nullptr,
                                 const char** failure = nullptr) noexcept;
@@ -10360,6 +10458,13 @@ bool portrait_model_resource(const std::string& model, ResourceBlob& blob) noexc
     try {
         ResourceFailure failure{}; std::uint64_t generation = 0;
         return !model.empty() && visual_figure_resource(model + ".mod", blob, generation, failure, nullptr, nullptr, nullptr);
+    } catch (...) { return false; }
+}
+
+bool portrait_texture_resource(const std::string& name, ResourceBlob& blob) noexcept {
+    try {
+        ResourceFailure failure{}; std::uint64_t generation = 0;
+        return !name.empty() && visual_named_resource(HudResourceRole::texture, name, blob, generation, failure);
     } catch (...) { return false; }
 }
 
@@ -10986,7 +11091,8 @@ std::shared_ptr<const TextureCpuAsset> visual_untextured_asset(ResourceFailure& 
 bool visual_part_texture(void* specific, void* texture, std::uint32_t type,
     VisualPartAsset& part, ResourceFailure& failure, const VisualPartAsset* previous,
     bool selection_changed, bool completed_textures, bool unit = false,
-    bool* untextured = nullptr, const std::string* database_primary = nullptr) {
+    bool* untextured = nullptr, const std::string* database_primary = nullptr,
+    const std::string* database_secondary = nullptr) {
     IDirectDrawSurface7* surface = nullptr;
     std::string name;
     if (texture) {
@@ -11010,8 +11116,10 @@ bool visual_part_texture(void* specific, void* texture, std::uint32_t type,
     // names): the texture keeps no surface and the draw binds NULL. A unit's
     // primary parts take its unit database skin instead (race primary
     // textures at the prototype's skin index, resolved by the caller; user
-    // decision 2026-11-13); a unit part still without a source is drawn
-    // untextured, never dropped. Other objects keep the failure.
+    // decision 2026-11-13), its secondary parts the race secondary texture
+    // at the same index (#285: the final golem's blades and face panel); a
+    // unit part still without a source is drawn untextured, never dropped.
+    // Other objects keep the failure.
     const auto untextured_part = [&]() {
         part.texture_source_name.clear();
         part.material_name.clear();
@@ -11020,9 +11128,9 @@ bool visual_part_texture(void* specific, void* texture, std::uint32_t type,
         return part.texture != nullptr;
     };
     bool database_skin = false;
-    if (visual_texture_name_unloadable(name) && database_primary && !database_primary->empty() &&
-        visual_primary_texture(type)) {
-        name = *database_primary;
+    const std::string* database_name = visual_primary_texture(type) ? database_primary : database_secondary;
+    if (visual_texture_name_unloadable(name) && database_name && !database_name->empty()) {
+        name = *database_name;
         database_skin = true;
     }
     if (visual_texture_name_unloadable(name)) return unit && untextured_part();
@@ -11538,18 +11646,19 @@ bool visual_publish_appearance(void* object, const VisualAppearanceChanges* chan
         for (std::size_t i = 0; i < assembly->skeleton->nodes.size(); ++i)
             if (!node_names.emplace(assembly->skeleton->nodes[i].name, static_cast<std::uint32_t>(i)).second)
                 return visual_failure(predicate, "appearance.duplicate_node");
-        // A unit without a primary texture name (script-created monsters)
-        // takes its unit database skin.
-        std::string database_primary, primary_name;
-        if (unit_specific && g_unit_blood_verified &&
-            visual_string(specific, 0xe0, primary_name, true) &&
-            visual_texture_name_unloadable(primary_name)) {
-            std::string template_name;
+        // A unit without a primary or secondary texture name (script-created
+        // monsters) takes its unit database skin from that race list.
+        std::string database_primary, database_secondary;
+        for (const bool secondary : {false, true}) {
+            std::string game_name, template_name;
             char skin[64]{};
-            if (visual_string(object, 0xa4, template_name) &&
+            if (unit_specific && g_unit_blood_verified &&
+                visual_string(specific, secondary ? 0xe4 : 0xe0, game_name, true) &&
+                visual_texture_name_unloadable(game_name) &&
+                visual_string(object, 0xa4, template_name) &&
                 critters::read_unit_race_skin(g_visual_game_image, object, template_name.c_str(),
-                    skin, visual_read_bytes, unit_blood_identity()))
-                database_primary = skin;
+                    skin, visual_read_bytes, unit_blood_identity(), secondary))
+                (secondary ? database_secondary : database_primary) = skin;
         }
         std::vector<std::string> untextured_parts;
         std::set<void*> seen;
@@ -11688,7 +11797,7 @@ bool visual_publish_appearance(void* object, const VisualAppearanceChanges* chan
                     texture_ready = visual_part_texture(specific, texture,
                         part.texture_type, part, failure, previous_part, rebound,
                         changes && changes->completed_textures, unit_specific != nullptr,
-                        &part_untextured, &database_primary);
+                        &part_untextured, &database_primary, &database_secondary);
                     if (part_untextured && untextured_parts.size() < 4) untextured_parts.push_back(part.name);
                 }
                 if (!texture_ready) return visual_failure(predicate, "appearance.part_texture");
@@ -11748,6 +11857,7 @@ bool visual_publish_appearance(void* object, const VisualAppearanceChanges* chan
             }
         }
         if (!bindings.empty()) return visual_failure(predicate, "appearance.unused_material_bindings");
+        assembly->ground_contact = visual_object_ground_contact(object);
         if (unit_specific && !visual_publish_unit_values(object, nullptr, nullptr, nullptr, predicate)) return false;
         // Astral rift veils: their energy clumps, generated once per assembly (astral_rift.h).
         add_astral_clumps(*assembly);
@@ -11787,8 +11897,8 @@ bool visual_publish_appearance(void* object, const VisualAppearanceChanges* chan
                 stored.recipe = std::move(recipe);
             } else g_published_recipes.erase(id);
         } else g_published_recipes.erase(id);
-        if (published && (!database_primary.empty() || !untextured_parts.empty()))
-            report_unit_texture_substitution(id, database_primary, untextured_parts);
+        if (published && (!database_primary.empty() || !database_secondary.empty() || !untextured_parts.empty()))
+            report_unit_texture_substitution(id, database_primary + '/' + database_secondary, untextured_parts);
         owned_timing.succeeded = published;
         return published || visual_failure(predicate, "appearance.assembly_publish");
     } catch (...) {}
@@ -12033,6 +12143,10 @@ void finish_visual_appearance(VisualAppearanceScope* scope, bool success) noexce
 VisualAppearanceScope* begin_visual_part_change(void* object, const void* figure,
                                                std::size_t existing_list,
                                                OuterFrameAppearanceCallback callback) noexcept {
+    // Armour changes pass MatchFigure's result straight to RemoveFigure, which
+    // is null when the unit has no such body part; the original then finds
+    // nothing and changes nothing. No figure means no appearance change.
+    if (!figure) return nullptr;
     bool valid = true;
     if (existing_list && g_visual_publication_active) {
         void* data = nullptr;
@@ -12051,8 +12165,11 @@ VisualAppearanceScope* begin_visual_part_change(void* object, const void* figure
     if (!scope) return nullptr;
     if (!valid) { fail_visual_appearance(scope, "part.existing_list"); return scope; }
     try {
+        // The name only narrows which parts rebind their textures. A figure
+        // without a readable name still leaves the completed object
+        // authoritative: rebind every part rather than drop the unit.
         std::string name;
-        if (!visual_string(figure, 0x120, name)) fail_visual_appearance(scope, "part.figure_name");
+        if (!visual_string(figure, 0x120, name)) scope->changes.textures = true;
         else scope->changes.rebound_parts.push_back(std::move(name));
     } catch (...) { fail_visual_appearance(scope, "appearance.name_exception"); }
     return scope;
@@ -12462,7 +12579,6 @@ bool prepare_owned_preview_pose(ObjectRenderPlan& plan, void* owner,
     auto& scene=retained_visual_scene();
     const auto resource=scene.visual_resource(plan.identity.id);
     std::uint64_t revision=0;
-    static bool preview_refused = false;
     bool preview_ready = scene.visual_preview_source(resource,sample,revision);
     if (!preview_ready && scene.visual_preview_rebind_due(resource, g_preview_frame_serial)) {
         // The unit's drawn surface was retired with no replacement (the game
@@ -12475,30 +12591,7 @@ bool prepare_owned_preview_pose(ObjectRenderPlan& plan, void* owner,
         preview_ready = scene.visual_preview_source(resource,sample,revision);
     }
     if (!preview_ready) {
-        preview_refused = true;
-        // Temporary (doll bug, 2026-11-06): each new refusal reason once, up to 32.
-        try {
-            static std::string last;
-            static unsigned logged = 0;
-            const std::string why = scene.visual_preview_diagnosis(resource);
-            if (why != last && logged < 32) {
-                ++logged; last = why;
-                SYSTEMTIME time{}; GetLocalTime(&time);
-                char stamp[48];
-                std::snprintf(stamp, sizeof(stamp), "time=%02u:%02u:%02u.%03u id=%d ",
-                    time.wHour, time.wMinute, time.wSecond, time.wMilliseconds, resource.signed_id);
-                append_bridge_event("owned_preview_source_refused", (stamp + why).c_str(), true);
-            }
-        } catch (...) {}
         return visual_failure(failure,"preview.source_publication");
-    }
-    if (preview_refused) {
-        preview_refused = false;
-        SYSTEMTIME time{}; GetLocalTime(&time);
-        char text[64];
-        std::snprintf(text, sizeof(text), "time=%02u:%02u:%02u.%03u id=%d",
-            time.wHour, time.wMinute, time.wSecond, time.wMilliseconds, resource.signed_id);
-        append_bridge_event("owned_preview_source_restored", text, true);
     }
     sample.lifecycle=plan.identity;
     sample.values.unit=true;
@@ -12574,6 +12667,24 @@ bool visual_read_intent(void* object, double time, VisualPoseIntent& intent, con
     return node == nullptr || visual_failure(failure, "intent.queue_tail");
 }
 #endif // !EID3D11_EMBEDDED
+
+// A unit whose animation event the scene refused was resynced from its
+// controller instead of omitted. One line per unit and world epoch (game
+// thread only) says which unit needed it and what was refused.
+void note_visual_intent_resync(std::int32_t id, const char* refused, const char* scope) noexcept {
+    static std::uint64_t named_epoch = ~0ull;
+    static std::vector<std::int32_t> named;
+    try {
+        const std::uint64_t epoch = bridge_current_world_epoch();
+        if (epoch != named_epoch) { named_epoch = epoch; named.clear(); }
+        if (named.size() >= 64 || std::find(named.begin(), named.end(), id) != named.end()) return;
+        named.push_back(id);
+        char detail[192]{};
+        _snprintf_s(detail, sizeof(detail), _TRUNCATE, "world_epoch=%llu id=%d refused=%s scope=%s",
+            static_cast<unsigned long long>(epoch), static_cast<int>(id), refused ? refused : "-", scope);
+        append_bridge_event("owned_intent_resync", detail, true);
+    } catch (...) {}
+}
 
 // The per-object render-time read performs the same checks as
 // visual_object_id + visual_main_selector and the placement/controller reads,
@@ -13528,11 +13639,24 @@ void finish_visual_packet(
             if (!scope->failed && scope->has_root_rotation &&
                 !scene.visual_publish_root_rotation(scope->resource, scope->root_rotation,
                     scope->root_rotation_time, &scope->failure_reason)) fail_visual_packet(scope, "root_rotation_publish");
+            // A refused intent or append resyncs from the controller, which
+            // the completed packet left authoritative, instead of omitting it.
+            const char* refused = nullptr;
             if (!scope->failed && scope->has_intent &&
-                !scene.visual_publish_intent(scope->resource, std::move(scope->intent), root, &scope->failure_reason)) fail_visual_packet(scope, "intent_publish");
+                !scene.visual_publish_intent(scope->resource, std::move(scope->intent), root, &refused) && !refused)
+                refused = "intent_publish";
             for (auto& event : scope->idle_events)
-                if (!scope->failed && !scene.visual_append_idle(scope->resource, event.revision,event.time,
-                        std::move(event.selection), &scope->failure_reason)) fail_visual_packet(scope, "idle_append");
+                if (!scope->failed && !refused && !scene.visual_append_idle(scope->resource, event.revision,event.time,
+                        std::move(event.selection), &refused) && !refused) refused = "idle_append";
+            if (!scope->failed && refused) {
+                double time = 0;
+                VisualPoseIntent intent;
+                if ((read_owned_world_time(g_visual_game_image, time) || visual_failure(&scope->failure_reason, "resync.clock")) &&
+                    visual_read_intent(scope->object, time, intent, &scope->failure_reason) &&
+                    scene.visual_publish_intent(scope->resource, std::move(intent), root, &scope->failure_reason))
+                    note_visual_intent_resync(scope->resource.signed_id, refused, "local_keep.packet");
+                else fail_visual_packet(scope, "intent_resync");
+            }
             if (!scope->failed) {
                 const bool appearance_changed = scope->appearance.changed;
                 bool appearance_missing_assembly = false;
@@ -13758,37 +13882,52 @@ void observe_visual_idle(void* controller, const void* selected, bool replace) n
         return;
     }
     try {
-        if (replace) {
-            double time = 0;
-            VisualPoseIntent intent;
-            std::array<float, 3> root{};
-            if ((read_owned_world_time(g_visual_game_image, time) || visual_failure(&failure, "idle.clock")) &&
-                visual_read_intent(object, time, intent, &failure) &&
-                (visual_read(object, 0x1c, root) || visual_failure(&failure, "idle.root"))) {
-                if (g_visual_packet && g_visual_packet->object == object) {
-                    g_visual_packet->intent = std::move(intent);
-                    g_visual_packet->has_intent = true;
-                    g_visual_packet->idle_events.clear();
-                    return;
-                }
-                if (scene.visual_publish_intent(resource, std::move(intent), root, &failure)) return;
-            }
-        } else {
+        // An append that arrives before any intent (a unit loaded already in
+        // a pose, e.g. a corpse, gets no animation packet) cannot extend a
+        // queue the scene never received. The original append has completed,
+        // so the controller's selection, queue and phase already hold this
+        // entry: publish that complete state, exactly as an idle set does.
+        const bool in_packet = g_visual_packet && g_visual_packet->object == object;
+        const bool first_append = !replace &&
+            !(in_packet && g_visual_packet->has_intent) && !scene.visual_has_intent(resource);
+        // An append the scene refuses (unknown clip, database identity, a full
+        // queue, any check it did not expect) never omits the unit: the
+        // controller is the authority, so resync from its complete state.
+        const char* refused = nullptr;
+        if (!replace && !first_append) {
             VisualClipSelection value{};
             std::uint64_t generation = 0;
             double time = 0;
             if ((read_owned_world_time(g_visual_game_image,time) || visual_failure(&failure,"idle.clock")) &&
                 visual_selected_clip(object, selected, value, generation, &failure)) {
                 const auto event = next_visual_event();
-                if (g_visual_packet && g_visual_packet->object == object) {
-                    if (g_visual_packet->idle_events.size() >= kVisualQueueLimit) {
-                        fail_visual_packet(g_visual_packet, "idle.queue_limit");
+                if (in_packet) {
+                    if (g_visual_packet->idle_events.size() < kVisualQueueLimit) {
+                        g_visual_packet->idle_events.push_back({event,time,std::move(value)});
                         return;
                     }
-                    g_visual_packet->idle_events.push_back({event,time,std::move(value)});
-                    return;
-                }
-                if (scene.visual_append_idle(resource, event,time,std::move(value), &failure)) return;
+                    failure = "idle.queue_limit";
+                } else if (scene.visual_append_idle(resource, event,time,std::move(value), &failure)) return;
+            }
+            refused = failure ? failure : "idle.append";
+            failure = nullptr;
+        }
+        double time = 0;
+        VisualPoseIntent intent;
+        std::array<float, 3> root{};
+        if ((read_owned_world_time(g_visual_game_image, time) || visual_failure(&failure, "idle.clock")) &&
+            visual_read_intent(object, time, intent, &failure) &&
+            (visual_read(object, 0x1c, root) || visual_failure(&failure, "idle.root"))) {
+            if (in_packet) {
+                g_visual_packet->intent = std::move(intent);
+                g_visual_packet->has_intent = true;
+                g_visual_packet->idle_events.clear();
+                if (refused) note_visual_intent_resync(id, refused, "local_keep.idle_append");
+                return;
+            }
+            if (scene.visual_publish_intent(resource, std::move(intent), root, &failure)) {
+                if (refused) note_visual_intent_resync(id, refused, "local_keep.idle_append");
+                return;
             }
         }
     } catch (...) { visual_failure(&failure, "idle.exception"); }
@@ -14170,6 +14309,20 @@ bool visual_capture_quest_light(void* world,void* object,std::int32_t id,
 // instead of one per field (~12 guarded calls per object over ~4,000 objects,
 // twice per frame). A faulting unit/quest read degrades exactly as the
 // guarded field reads did: not a unit / a quest-light failure.
+// The game's own "can be used" rule for a map object, as the mission cursor
+// decision calls it (base 63A103/63A111, LiA 574FC9/574FD7; admitted by
+// highlight_alt_ready): CMapObject vtable +0x98 IsScientific (an enabled
+// lever or chest with a science tool, a trap) and not +0x9C IsScientificDoor.
+// Both are pure getters; called only while Alt is held.
+bool map_object_usable(void* object) noexcept {
+    using Getter = int (__thiscall*)(void*);
+    __try {
+        auto* const* table = *static_cast<void* const* const*>(object);
+        return reinterpret_cast<Getter>(table[0x98 / 4])(object) != 0 &&
+               reinterpret_cast<Getter>(table[0x9c / 4])(object) == 0;
+    } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
 struct RawWorldObject {
     void* object; std::int32_t id; bool unit; bool hero; bool torch; std::uint8_t quest; // 0 none, 1 candidate or failure
 };
@@ -14238,6 +14391,14 @@ bool harness_dress(void* specific, const std::uint32_t* armors) noexcept {
     } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
 } // namespace
+bool bridge_harness_draw_visible_only(std::int32_t value, std::int32_t& before) noexcept {
+    if(!g_visual_game_image)return false;
+    const std::uint32_t offset=retained_seam_contract().visible_only_setting;
+    if(!visual_read(g_visual_game_image,offset,before))return false;
+    if(value>=0)*reinterpret_cast<volatile std::int32_t*>(g_visual_game_image+offset)=value;
+    return true;
+}
+
 bool bridge_harness_equip_step(std::uint32_t step, std::string& detail) noexcept try {
     detail.clear();
     const std::uint8_t* image = g_visual_game_image;
@@ -14297,14 +14458,93 @@ bool bridge_harness_equip_step(std::uint32_t step, std::string& detail) noexcept
 } catch (...) { detail = "allocation failed"; return false; }
 namespace {
 
+// A unit the original game draws is never left out (user rule, #308). A unit
+// the scene rejected is re-read here, at the render-time seam after the game's
+// writers have completed, from the game object itself. Only what the reject
+// cleared is rebuilt: the appearance only when no assembly survives; the
+// route, values, root rotation and animation intent are plain field reads.
+// Each reject is re-read once; a unit is re-read again only after a new game
+// event rejects it again (repeat= counts that per world epoch).
+void resync_visual_unit(void* object, VisualResourceIncarnation resource,
+    const RetainedStaticScene::VisualResyncCandidate& candidate) noexcept {
+    auto& scene = retained_visual_scene();
+    const char* failure = nullptr;
+    const auto begin = bridge_now();
+    bool rebuilt_appearance = false;
+    // Rejects raised inside this re-read must not queue the unit again.
+    scene.visual_suppress_resync_queue(true);
+    struct Restore { ~Restore() { retained_visual_scene().visual_suppress_resync_queue(false); } } restore;
+    try {
+        void* specific = nullptr;
+        double time = 0;
+        std::array<float, 3> root{};
+        std::array<float, 4> rotation{};
+        VisualRouteValues values;
+        auto route = std::make_shared<CompiledVisualRoute>();
+        VisualPoseIntent intent;
+        bool ok = (visual_client_unit(object, specific) || visual_failure(&failure, "resync.client")) &&
+            (read_owned_world_time(g_visual_game_image, time) || visual_failure(&failure, "resync.clock"));
+        if (ok && (!scene.visual_assembly(resource) ||
+                   candidate.status == RetainedVisualStatus::unsupported_appearance ||
+                   candidate.status == RetainedVisualStatus::invalid_asset)) {
+            rebuilt_appearance = true;
+            ok = visual_publish_appearance(object, nullptr, &failure);
+        }
+        ok = ok &&
+            (visual_read_route(static_cast<std::uint8_t*>(object)+0x27c,
+                 static_cast<std::uint8_t*>(specific)+0x38, values) || visual_failure(&failure, "resync.route_read")) &&
+            (compile_visual_route(std::move(values), next_visual_event(), *route) || visual_failure(&failure, "resync.route_compile")) &&
+            (scene.visual_publish_route(resource, route) || visual_failure(&failure, "resync.route_publish")) &&
+            visual_publish_unit_values(object, nullptr, nullptr, nullptr, &failure) &&
+            (visual_read(object, 0x1c, root) || visual_failure(&failure, "resync.root")) &&
+            (visual_read(object, 0x34, rotation) || visual_failure(&failure, "resync.rotation")) &&
+            scene.visual_publish_root_rotation(resource, rotation, time, &failure) &&
+            visual_read_intent(object, time, intent, &failure);
+        if (ok) {
+            intent.facing = route->values.start_angle;
+            ok = scene.visual_publish_intent(resource, std::move(intent), root, &failure);
+        }
+        // A failed re-read leaves the unit as its original reject left it;
+        // only a new game event may queue it again (never this seam).
+    } catch (...) { failure = "resync.exception"; }
+    // One line per resync, uncapped up to a log guard per world epoch: every
+    // unit we re-read or still leave out is named, seen by the party or not.
+    static std::uint64_t named_epoch = ~0ull;
+    static std::vector<std::pair<std::int32_t, std::uint32_t>> repeats;
+    try {
+        const std::uint64_t epoch = bridge_current_world_epoch();
+        if (epoch != named_epoch) { named_epoch = epoch; repeats.clear(); }
+        std::uint32_t repeat = 1;
+        auto found = std::find_if(repeats.begin(), repeats.end(),
+            [&](const auto& value) { return value.first == resource.signed_id; });
+        if (found != repeats.end()) repeat = ++found->second;
+        else repeats.emplace_back(resource.signed_id, 1u);
+        if (repeats.size() > 4096 && found == repeats.end()) return;
+        const auto assembly = scene.visual_assembly(resource);
+        std::uint32_t dead = 0;
+        (void)visual_read(object, 0x274, dead);
+        char detail[384]{};
+        _snprintf_s(detail, sizeof(detail), _TRUNCATE,
+            "world_epoch=%llu id=%d model=%s dead=%d refused=%s scope=%s result=%s failed=%s appearance=%d repeat=%u ms=%.3f",
+            static_cast<unsigned long long>(epoch), static_cast<int>(resource.signed_id),
+            assembly && assembly->skeleton ? assembly->skeleton->visual_reference.c_str() : "-", dead ? 1 : 0,
+            candidate.reason ? candidate.reason : "-", candidate.scope ? candidate.scope : "-",
+            failure ? "failed" : "republished", failure ? failure : "-", rebuilt_appearance ? 1 : 0, repeat,
+            static_cast<double>(bridge_now() - begin) * 1000.0 / static_cast<double>(bridge_frequency()));
+        append_bridge_event("owned_unit_resync", detail, true);
+    } catch (...) {}
+}
+
 bool publish_visual_object_poses(void* world, const char** failure = nullptr,
     std::uint64_t* manager_objects = nullptr,
     std::vector<RetainedQuestLight>* quest_lights = nullptr,
     bool publish_poses = true,
     std::vector<std::int32_t>* hero_light_ids = nullptr,
-    std::vector<TorchLightLift>* torch_lights = nullptr) noexcept {
+    std::vector<TorchLightLift>* torch_lights = nullptr,
+    std::vector<std::int32_t>* usable_objects = nullptr) noexcept {
     if (manager_objects) *manager_objects = 0;
     if (quest_lights) quest_lights->clear();
+    if (usable_objects) usable_objects->clear();
     if (hero_light_ids) hero_light_ids->clear();
     if (torch_lights) torch_lights->clear();
     if (world != g_visual_game_image+world_clock_contract().client_rva) return visual_failure(failure, "static.world");
@@ -14357,6 +14597,12 @@ bool publish_visual_object_poses(void* world, const char** failure = nullptr,
                 pending = g_pending_unit_appearances.erase(pending);
             else ++pending;
     }
+    // Units rejected since the last walk, re-read below once each (#308).
+    static std::vector<RetainedStaticScene::VisualResyncCandidate> resync;
+    if (publish_poses && retained_visual_scene().visual_take_resync_candidates(resync))
+        std::sort(resync.begin(), resync.end(),
+            [](const auto& a, const auto& b) { return a.signed_id < b.signed_id; });
+    else resync.clear();
     for (const auto& item:walked) {
         if (publish_poses && item.unit && !g_pending_unit_appearances.empty()) {
             const auto pending = g_pending_unit_appearances.find(item.id);
@@ -14376,6 +14622,14 @@ bool publish_visual_object_poses(void* world, const char** failure = nullptr,
             changes.changed = changes.textures = true;
             const char* predicate = nullptr;
             (void)visual_publish_appearance(item.object, &changes, &predicate);
+        }
+        if (item.unit && !resync.empty()) {
+            const auto candidate = std::lower_bound(resync.begin(), resync.end(), item.id,
+                [](const auto& value, std::int32_t id) { return value.signed_id < id; });
+            if (candidate != resync.end() && candidate->signed_id == item.id) {
+                const auto resource = retained_visual_scene().visual_resource(item.id);
+                if (resource.serial) resync_visual_unit(item.object, resource, *candidate);
+            }
         }
         if (hero_light_ids && item.hero) {
             std::int32_t id=0;bool present=false;const char* light_failure=nullptr;
@@ -14416,9 +14670,14 @@ bool publish_visual_object_poses(void* world, const char** failure = nullptr,
                 retained_visual_scene().visual_publish_scene_detection(item.id,(flags&0x00400000u)!=0);
             continue;
         }
+        if (usable_objects && map_object_usable(item.object)) {
+            try { usable_objects->push_back(item.id); }
+            catch (...) { usable_objects->clear(); usable_objects = nullptr; }
+        }
         if (!publish_poses) continue;
         objects.push_back({item.object,item.id});
     }
+    if (usable_objects) std::sort(usable_objects->begin(), usable_objects->end());
     if(objects.empty())return true;
     // Units are deliberately excluded: their camera-written CP is not
     // authoritative visual phase. Their owned route supplies the root.
@@ -15032,6 +15291,22 @@ constexpr std::uint32_t kTreeObjectTypeId = 53;  // MOTID_TREE creates the tree 
 // Client terrain clamps at sectors*32 cells of 1 unit, minus one (CWorldClient::GetZValue).
 constexpr float kTerrainUnitsPerSector = 32.0f;
 
+// Whether a map object (client copy or local-server object: one class, one
+// vtable) takes the ground contact blend (#324): not campfires and torches
+// (CTorchObject), not ground loot (CLeverObject with a loot_lever_model mask
+// +A4, the value AddMapObjects sends).
+#ifndef EID3D11_EMBEDDED
+bool visual_object_ground_contact(const void* object) noexcept {
+    const void* table = nullptr;
+    if (!g_visual_game_image || !visual_read(object, 0, table)) return true;
+    const auto& contract = world_environment_contract();
+    if (table == g_visual_game_image + contract.torch_table) return false;
+    if (table != g_visual_game_image + contract.lever_table) return true;
+    std::string mask;
+    return !visual_string(object, kObjectMaskNameOffset, mask) || !loot_lever_model(mask);
+}
+#endif
+
 struct RawServerSeedObject {
     std::int32_t id = 0;
     std::uint32_t type = 0;
@@ -15100,8 +15375,10 @@ struct ServerSeedAppearance {
     std::vector<std::string> names;
     std::array<float,3> shape{};
     bool tree = false;
+    bool ground_contact = true;  // visual_object_ground_contact
     std::string key() const {
-        std::string value = mask + '|' + primary + '|' + secondary + (tree ? "|t" : "|o");
+        std::string value = mask + '|' + primary + '|' + secondary + (tree ? "|t" : "|o") +
+            (ground_contact ? "|g" : "|n");
         for (const auto& name : names) value += '|' + name;
         char text[64];
         std::snprintf(text, sizeof(text), "|%a|%a|%a", shape[0], shape[1], shape[2]);
@@ -15127,6 +15404,7 @@ bool read_server_seed_appearance(const RawServerSeedObject& raw, ServerSeedAppea
         if (!visual_string(names, index*4, value.names[index])) return false;
     value.shape = raw.shape;
     value.tree = raw.type == kTreeObjectTypeId;
+    value.ground_contact = visual_object_ground_contact(raw.object);
     return true;
 }
 #endif // !EID3D11_EMBEDDED
@@ -15230,6 +15508,7 @@ std::shared_ptr<const VisualAssemblyAsset> build_server_seed_assembly(
     assembly->shape = source.shape;
     add_astral_clumps(*assembly);  // astral rift veils (astral_rift.h)
     if (source.tree) sway_tree_assembly(*assembly);
+    assembly->ground_contact = source.ground_contact;
     std::sort(backings.begin(), backings.end());
     backings.erase(std::unique(backings.begin(), backings.end()), backings.end());
     assembly->source_backings = std::move(backings);
@@ -15291,7 +15570,13 @@ bool read_server_spells(const std::uint8_t* image, ServerSpell* out, std::uint32
             const auto* effect = *reinterpret_cast<const std::uint8_t* const*>(spell + 0x90);
             s.effect_vtable = rva(effect);
             if (effect && s.effect_vtable == 0x343630u) std::memcpy(s.wall, effect + 0x180, 12);
-            else s.wall[0] = s.wall[1] = s.wall[2] = 0;
+            else if (effect && s.effect_vtable == 0x343690u) {
+                // CEffectLightning (the lightning wall): ptSrc +14C, ptDst +158
+                // (SetParams, RVA 27A6B0, stores them there); half its span.
+                float src[3], dst[3];
+                std::memcpy(src, effect + 0x14c, 12); std::memcpy(dst, effect + 0x158, 12);
+                for (int k = 0; k < 3; ++k) s.wall[k] = (dst[k] - src[k]) * .5f;
+            } else s.wall[0] = s.wall[1] = s.wall[2] = 0;
             s.time_left = *reinterpret_cast<const std::int32_t*>(spell + 0xa0);
         }
         return true;
@@ -15306,6 +15591,9 @@ bool read_server_spells(const std::uint8_t* image, ServerSpell* out, std::uint32
 // landed), fire wall 6 in its action phase while its time lasts, with its
 // CEffectWall direction. Reads only; nothing is written or called.
 constexpr std::uint32_t kEffectSpellTableRva = 0x0034399c, kEffectWallTableRva = 0x00343630;
+// The lightning wall (subtype 7): a CEffectLightning between two points 1 m
+// over the surface, half a span the spell's radius each side of its centre.
+constexpr std::uint32_t kEffectLightningTableRva = 0x00343690;
 // Ground lightning (subtype 4), checked against BE0FC330...DEE94E2:
 // StartSpell's dispatch maps 4 to RVA 280124, which copies the surface-
 // adjusted target into cp (+10). That cp is the bolt's destination; radius
@@ -15349,6 +15637,8 @@ void fire_burn_publish() noexcept {
                     else if ((s.subtype >> 16) == 4 && ground_lightning && s.time_left >= 0) f.kind = 3;
                     else if ((s.subtype >> 16) == 6 && s.time_left >= 0 && s.effect_vtable == kEffectWallTableRva) {
                         f.kind = 2; f.wall = {s.wall[0], s.wall[1]};
+                    } else if ((s.subtype >> 16) == 7 && s.time_left >= 0 && s.effect_vtable == kEffectLightningTableRva) {
+                        f.kind = 4; f.wall = {s.wall[0], s.wall[1]};   // the lightning wall: its bolt's span
                     } else continue;
                     f.center = {s.cp[0], s.cp[1], s.cp[2]}; f.radius = s.radius;
                     out.push_back(f);
@@ -16591,6 +16881,9 @@ extern "C" void __stdcall dispatch_retained_static_scene(
             capture_retained_scene_world_to_clip(
                 renderer, scene_world_to_clip);
         if (g_visual_publication_active) {
+            // Without it the world frame never becomes active and every
+            // object takes the per-figure path: name it (#287).
+            if (!scene_world_to_clip_valid) report_object_plan_failure("retained_scene_world_to_clip");
             const bool submitted = scene_world_to_clip_valid &&
                 (scene_handoff_active() ? queue_owned_visual_scene(scene,renderer,scene_world_to_clip) :
                  submit_owned_visual_scene(scene,renderer,scene_world_to_clip));
@@ -17042,7 +17335,19 @@ BOOL __fastcall hook_world_draw(void* self, void*) {
             const std::uint64_t epoch = bridge_current_world_epoch();
             const bool hold = g_load_reveal_enabled.load(std::memory_order_relaxed) && epoch &&
                 epoch != g_load_reveal_revealed_epoch.load(std::memory_order_relaxed);
-            load_pause_world_frame(self, hold, epoch, hold && local_single_player_mission());
+            // Every present reports the reveal state (apply_load_reveal; in
+            // core mode the host's, read at the game's present). World Draws
+            // without one mean the renderer stopped, and the pause lets go.
+            constexpr unsigned kUnreportedDrawLimit = 30;
+            const bool reporting = g_load_reveal_unreported_draws.fetch_add(1, std::memory_order_relaxed) <
+                kUnreportedDrawLimit;
+            // Whether the previous world Draw completed: the hold counts only
+            // those (apply_load_reveal), so the pause lets go when they stop.
+            static std::uint64_t last_completion = 0;
+            const bool previous_counted = g_world_draw_completion_counter != last_completion;
+            last_completion = g_world_draw_completion_counter;
+            load_pause_world_frame(self, hold, epoch, hold && local_single_player_mission(), reporting,
+                                   previous_counted);
         }
         debug_lightning_world_frame(self);
         game_back_clip_world_frame(self);
@@ -18413,11 +18718,16 @@ void capture_owned_world_shadow_inputs(void* scene,void* renderer,OwnedShadowInp
     // Read common values, never its camera list or a game animation method.
     const char* object_failure = nullptr;
 #if !defined(EID3D11_EMBEDDED)
+    // While Alt is held, the same walk lists the usable map objects.
+    static std::vector<std::int32_t> alt_objects;
+    const bool alt=highlight_alt_held();
     {
         CityRetainedOwnerGuard pose_timing(CityRetainedOwner::nonunit_pose);
-        if (!publish_visual_object_poses(scene,&object_failure))
+        if (!publish_visual_object_poses(scene,&object_failure,nullptr,nullptr,true,nullptr,nullptr,
+                alt ? &alt_objects : nullptr))
             throw object_failure ? object_failure : "owned_shadow_object_values";
     }
+    if (!alt) alt_objects.clear();
 #endif
     CityRetainedOwnerGuard lighting_timing(CityRetainedOwner::lighting_publish);
     if(publish_retained_world_lighting(renderer)!=FigureFallbackReason::none)throw "owned_shadow_lighting_unavailable";
@@ -18426,7 +18736,7 @@ void capture_owned_world_shadow_inputs(void* scene,void* renderer,OwnedShadowInp
     in.draw_undetected=!visible_only || interface_kind!=1;
     lighting_timing.finish();
 #ifndef EID3D11_EMBEDDED
-    publish_highlight_state();
+    publish_highlight_state(alt, alt_objects);
 #endif
     {
         CityRetainedOwnerGuard values_timing(CityRetainedOwner::visual_frame_values);
@@ -18546,6 +18856,15 @@ bool queue_owned_visual_scene(void* scene,void* renderer,
         command->camera_anchor_z=game_camera_anchor_z();
         capture_owned_world_shadow_inputs(scene,renderer,command->inputs);
         command->lighting=g_native_world_lighting_frame;
+        // Harness camera_unit: the units' positions (dump_units' source) and
+        // this frame's projection, only while that command runs.
+        if(command->inputs.values && harness_wants_world_view()) {
+            std::vector<HarnessUnitPosition> units;
+            for(const auto& sample:command->inputs.values->entities)
+                if(sample.values.unit)
+                    units.push_back({sample.lifecycle.id,{sample.pose.root[0],sample.pose.root[1],sample.pose.root[2]}});
+            harness_note_world_view(std::move(units),world_to_clip);
+        }
         // The game's fog function per entity (a game call). The revision is
         // read first: a publication during the loop leaves the stamp older
         // than the values, so the next frame recomputes them.
@@ -26324,6 +26643,42 @@ void uninstall_camera_mouse_yaw_hook(std::uint8_t* image) {
     g_camera_mouse_yaw_installed = false;
 }
 
+const CameraAltScrollTest& camera_alt_scroll_test() noexcept {
+    static constexpr CameraAltScrollTest base{kCameraAltScrollSiteRva,{{0x8a,0x48,0x7e,0x84,0xc9,0x0f,0x85,0xd5,0x00,0x00,0x00}}};
+    static constexpr CameraAltScrollTest lia{kLiaCameraAltScrollSiteRva,{{0x8a,0x48,0x7e,0x84,0xc9,0x0f,0x85,0xb5,0x00,0x00,0x00}}};
+    return running_game_sites().report.engine == GameEngine::lia ? lia : base;
+}
+
+// The Alt scroll test's JNZ to a NOP when all 11 expected bytes are there;
+// restored only while the NOP is still ours.
+bool write_camera_alt_scroll_jump(std::uint8_t* jump, const std::uint8_t* bytes) noexcept {
+    DWORD protection = 0;
+    if (!VirtualProtect(jump, kCameraAltScrollNop.size(), PAGE_EXECUTE_READWRITE, &protection)) return false;
+    std::memcpy(jump, bytes, kCameraAltScrollNop.size());
+    DWORD ignored = 0;
+    VirtualProtect(jump, kCameraAltScrollNop.size(), protection, &ignored);
+    FlushInstructionCache(GetCurrentProcess(), jump, kCameraAltScrollNop.size());
+    return true;
+}
+
+bool install_camera_alt_rotate(std::uint8_t* image) noexcept {
+    const auto& site = camera_alt_scroll_test();
+    auto* test = image + site.rva;
+    if (std::memcmp(test, site.bytes.data(), site.bytes.size()) != 0) return false;
+    if (!write_camera_alt_scroll_jump(test + 5, kCameraAltScrollNop.data())) return false;
+    g_camera_alt_rotate_installed = true;
+    return true;
+}
+
+void uninstall_camera_alt_rotate(std::uint8_t* image) noexcept {
+    if (!image || !g_camera_alt_rotate_installed) return;
+    const auto& site = camera_alt_scroll_test();
+    auto* jump = image + site.rva + 5;
+    if (std::memcmp(jump, kCameraAltScrollNop.data(), kCameraAltScrollNop.size()) == 0)
+        write_camera_alt_scroll_jump(jump, site.bytes.data() + 5);
+    g_camera_alt_rotate_installed = false;
+}
+
 void uninstall_camera_mouse_pitch_hook(std::uint8_t* image) {
     if (!image || !g_camera_mouse_pitch_installed) return;
     auto* call = image + camera_mouse_contract().pitch_call;
@@ -26402,6 +26757,7 @@ bool g_highlight_briefing = false;
 bool g_highlight_selected = false;
 bool g_highlight_hover_characters = true;
 bool g_highlight_hover_objects = true;
+bool g_highlight_alt = true;  // option highlight_alt: off reads no Alt, marks nothing
 // The last cursor target and the cursor mode that must still be current for it.
 SRWLOCK g_highlight_hover_lock = SRWLOCK_INIT;
 VisualResourceIncarnation g_highlight_hover{};
@@ -26720,6 +27076,50 @@ bool uninstall_modal_backdrop_hooks(std::uint8_t* image) {
     return restored;
 }
 
+// CI3DScreenSaveLoad::QuickSave (6570E0) copies the render surface for the
+// save picture (GetFromScreen) straight from the quick-save key, between
+// frames. DirectDraw kept the last frame in that surface; the owned renderer
+// presents its frame and keeps none, so the copy was black (D3D12 opens a
+// new, cleared frame for it; on D3D11 the flip-discard back buffer's contents
+// are undefined after Present). The game's
+// autosave path of the same function first draws a frame without a flip,
+// `if (bIsAuto) NGame::DrawFrame(false)`: 65715C test bl,bl; jz +9; mov dl,1;
+// xor cl,cl; call 458010. The jz becomes two nops, so a quick save draws that
+// frame too and copies it. QuickSave itself draws another frame right after
+// (DrawTextOverFrame), from the same key handler.
+constexpr std::uint32_t kQuickSaveAutoBranchRva = 0x25715c;
+constexpr std::array<std::uint8_t,13> kQuickSaveAutoBranchBytes{{0x84,0xdb,0x74,0x09,0xb2,0x01,0x32,0xc9,
+    0xe8,0xa7,0x0e,0xe0,0xff}};
+bool g_quick_save_frame_installed = false;
+
+bool install_quick_save_frame(std::uint8_t* image) {
+    if (!image || g_quick_save_frame_installed) return false;
+    auto* site = image + kQuickSaveAutoBranchRva;
+    if (std::memcmp(site, kQuickSaveAutoBranchBytes.data(), kQuickSaveAutoBranchBytes.size()) != 0) return false;
+    DWORD protection = 0;
+    if (!VirtualProtect(site + 2, 2, PAGE_EXECUTE_READWRITE, &protection)) return false;
+    site[2] = 0x90; site[3] = 0x90;
+    DWORD ignored = 0;
+    VirtualProtect(site + 2, 2, protection, &ignored);
+    FlushInstructionCache(GetCurrentProcess(), site + 2, 2);
+    g_quick_save_frame_installed = true;
+    return true;
+}
+
+bool uninstall_quick_save_frame(std::uint8_t* image) {
+    if (!image || !g_quick_save_frame_installed) return true;
+    auto* site = image + kQuickSaveAutoBranchRva;
+    g_quick_save_frame_installed = false;
+    if (site[2] != 0x90 || site[3] != 0x90) return false;  // a foreign owner now holds the branch; leave it
+    DWORD protection = 0;
+    if (!VirtualProtect(site + 2, 2, PAGE_EXECUTE_READWRITE, &protection)) return false;
+    site[2] = kQuickSaveAutoBranchBytes[2]; site[3] = kQuickSaveAutoBranchBytes[3];
+    DWORD ignored = 0;
+    VirtualProtect(site + 2, 2, protection, &ignored);
+    FlushInstructionCache(GetCurrentProcess(), site + 2, 2);
+    return true;
+}
+
 #endif // !EID3D11_EMBEDDED
 
 // The base (briefing) screen is open while it is on the interface screen stack
@@ -26747,8 +27147,41 @@ bool highlight_base_screen_open() noexcept {
 }
 #endif // !EID3D11_EMBEDDED
 
+// Alt is the game's force-move key: CInterface3D::OnKeyDown/OnKeyUp keep
+// bAltDown (interface object +0x7E) and ResetInputState clears it. The mission
+// cursor decision reads it before its CT_USE branches (base 639F8D, LiA
+// 574EAE: pI3D +0x98, byte +0x7E), and those branches call the usable-object
+// getters checked here (map_object_usable). The renderer only reads the flag.
+bool highlight_alt_ready() noexcept {
+    static int ready = -1;
+    if (ready < 0 && g_visual_game_image) {
+        const auto* image = g_visual_game_image;
+        const bool lia = running_game_sites().report.engine == GameEngine::lia;
+        ready = (lia
+            ? signature(image + 0x174eae, {0x8b,0x8f,0x98,0,0,0,0x8a,0x41,0x7e,0x84,0xc0}) &&
+              signature(image + 0x174fc9, {0xff,0x90,0x98,0,0,0,0x85,0xc0,0x74,0x17,
+                                           0x8b,0x16,0x8b,0xce,0xff,0x92,0x9c,0,0,0})
+            : base_layout_only() &&
+              signature(image + 0x239f8d, {0x8b,0x95,0x98,0,0,0,0x8a,0x42,0x7e,0x84,0xc0}) &&
+              signature(image + 0x23a103, {0xff,0x92,0x98,0,0,0,0x85,0xc0,0x74,0x1b,
+                                           0x8b,0x06,0x8b,0xce,0xff,0x90,0x9c,0,0,0})) ? 1 : 0;
+        if (!ready)
+            append_bridge_event("alt_highlight_omitted",
+                "Native Alt key or usable-object contract mismatch; Alt shows no highlights.", true);
+    }
+    return ready == 1;
+}
+
+#ifndef EID3D11_EMBEDDED
+bool highlight_alt_held() noexcept {
+    std::uint8_t down = 0;
+    return g_highlight_alt && highlight_alt_ready() &&
+        visual_read(g_visual_game_image + highlight_contract().interface_object, 0x7e, down) && down != 0;
+}
+#endif
+
 // Once per rendered frame, before the frame samples are taken.
-void publish_highlight_state() noexcept {
+void publish_highlight_state(bool alt, const std::vector<std::int32_t>& alt_objects) noexcept {
 #ifdef EID3D11_EMBEDDED
     // The host publishes its screen and cursor target directly. Retail image
     // reads must not overwrite the host's combat-pause or hover publications.
@@ -26788,6 +27221,10 @@ void publish_highlight_state() noexcept {
         // shown only while that decision is still the current cursor.
         if (hover.signed_id && highlight_cursor_mode(mode) && mode == required)
             state.hover = hover;
+    }
+    state.alt = alt;
+    if (alt) {
+        try { state.alt_objects = alt_objects; } catch (...) { state.alt_objects.clear(); }
     }
     retained_visual_scene().visual_publish_highlight(state);
 #endif
@@ -29689,6 +30126,11 @@ bool EngineBridge::install() {
         report(modal_backdrop_installed ? "modal_backdrop_installed" : "modal_backdrop_rejected",
                modal_backdrop_installed ? "verified_fade_thumbnail_and_reader_sites" :
                                           "site_mismatch_game_fades_and_stretches_on_cpu");
+        const bool quick_save_frame_installed = install_quick_save_frame(
+            reinterpret_cast<std::uint8_t*>(image_));
+        report(quick_save_frame_installed ? "quick_save_frame_installed" : "quick_save_frame_rejected",
+               quick_save_frame_installed ? "verified_autosave_branch_quick_save_draws_its_picture_frame" :
+                                            "site_mismatch_quick_save_picture_may_be_black");
         const bool camera_mouse_yaw_installed = install_camera_mouse_yaw_hook(
             reinterpret_cast<std::uint8_t*>(image_));
         const bool camera_mouse_pitch_installed = camera_mouse_yaw_installed &&
@@ -29705,6 +30147,11 @@ bool EngineBridge::install() {
                camera_mouse_rotation_installed ?
                    "verified_displacement_consumers_and_limits" :
                    "yaw_or_pitch_callsite_or_owner_mismatch");
+        if (camera_mouse_rotation_installed) {
+            const bool alt_rotate = install_camera_alt_rotate(reinterpret_cast<std::uint8_t*>(image_));
+            report(alt_rotate ? "camera_alt_rotate_installed" : "camera_alt_rotate_rejected",
+                   alt_rotate ? "verified_alt_scroll_test" : "alt_scroll_test_bytes_mismatch");
+        }
         const bool hit_test_installed = install_global_map_hit_test_hook(
             reinterpret_cast<std::uint8_t*>(image_));
         report(hit_test_installed ? "zone_hit_test_installed" : "zone_hit_test_rejected",
@@ -30089,6 +30536,7 @@ bool EngineBridge::uninstall() {
     restored &= uninstall_game_print_hooks(image);
 #ifndef EID3D11_EMBEDDED
     restored &= uninstall_combat_text_hooks(image);
+    uninstall_camera_alt_rotate(image);
 #endif
     uninstall_camera_mouse_pitch_hook(image);
     uninstall_camera_mouse_yaw_hook(image);
@@ -30099,6 +30547,10 @@ bool EngineBridge::uninstall() {
     }
     if (!uninstall_modal_backdrop_hooks(image)) {
         report("modal_backdrop_uninstall_pending","foreign_call_site_owner_preserved");
+        restored = false;
+    }
+    if (!uninstall_quick_save_frame(image)) {
+        report("quick_save_frame_uninstall_pending","foreign_branch_owner_preserved");
         restored = false;
     }
     uninstall_owned_cursor_hooks(image);
@@ -30882,7 +31334,8 @@ void bridge_clear_world_map_previews(Renderer* renderer) noexcept {
 
 #endif
 void bridge_set_highlight_options(bool briefing, bool selected, bool hover_characters,
-                                  bool hover_objects) noexcept {
+                                  bool hover_objects, bool alt) noexcept {
+    g_highlight_alt = alt;
     g_highlight_briefing = briefing;
     g_highlight_selected = selected;
     g_highlight_hover_characters = hover_characters;
@@ -31485,6 +31938,21 @@ bool bridge_local_single_player_mission() noexcept {
     return local_single_player_mission();
 }
 
+// Game thread only. The zone type +12D64 comes from the zone file and the
+// save (595A52, 597170) and the game tests it against 1, 3 and 4; a loaded
+// non-mission zone still runs the local server and its party.
+LocalServerState bridge_local_server_state() noexcept {
+    LocalServerState state;
+    const auto* image = reinterpret_cast<const std::uint8_t*>(GetModuleHandleW(nullptr));
+    const void* world = image + server_state_contract().units.world;
+    const void* table = nullptr;
+    state.readable = visual_read(world, 0, table) && table == image + server_state_contract().units.world_table &&
+        visual_read(world, kServerModeOffset, state.mode) &&
+        visual_read(world, kServerMapLoadedOffset, state.loaded) &&
+        visual_read(world, kServerInterfaceOffset, state.zone_type);
+    return state;
+}
+
 void* bridge_supported_addon_image() noexcept {
     return find_addon_module();
 }
@@ -31742,12 +32210,16 @@ void bridge_release_embedded_world_locals() noexcept {
     g_scene_frame_values_installed = false;
 }
 
-void bridge_sample_embedded_visuals(double time, bool briefing, std::int32_t hover_id,
+bool bridge_embedded_alt_enabled() noexcept { return g_highlight_alt; }
+
+void bridge_sample_embedded_visuals(double time, bool briefing, bool alt, std::vector<std::int32_t> usable, std::int32_t hover_id,
     std::uint64_t hover_serial, RetainedVisualFrame& output) {
     RetainedHighlightState state;
     state.show_selected = g_highlight_selected;
     state.hover_characters = g_highlight_hover_characters;
     state.hover_objects = g_highlight_hover_objects;
+    state.alt = alt;
+    state.alt_objects = std::move(usable);
     state.strip_preselected = briefing && !g_highlight_briefing;
     state.hover = {hover_id, hover_serial};
     auto& scene = retained_visual_scene();

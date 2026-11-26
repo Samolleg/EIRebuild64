@@ -2938,6 +2938,11 @@ inline float blast_reach(float flee_r, float radius) {
 struct WorldView {
     const std::vector<std::array<float, 3>>* spell_lights = nullptr;   // this frame's spell lights: x, y, range
     const std::vector<Blast>* blasts = nullptr;                         // the director's live blasts
+    // Fire burn (renderer_fire_burn.cpp): whether fire burns at a point now,
+    // and lighting the game's fire on something burning there (tumbleweeds).
+    const void* fire = nullptr;
+    bool (*fire_at)(const void*, float, float) = nullptr;
+    void (*fire_ignite)(const void*, float, float, float, float) = nullptr;
     const Obstacles* obstacles = nullptr;
     std::uint32_t unavailable = 0;   // species whose game assets failed to load
     // Player per-type spawn weight (kCritterTypeSettings): 1 is the normal mix, 0 the type is off.
@@ -5727,8 +5732,9 @@ HRESULT Renderer::render_critters(const FixedState& frame, const std::array<floa
         w.level = level;
         // The water of the fish: rebuilt with the map and with every liquid
         // level step (ambient_liquid_level_updates_: the dam quest).
-        // Sea: the surf's own rule (a map the water_surf_no_sea_maps setting excludes has none).
-        const bool takes_sea = liquid_surf_map_takes_sea(ambient_map_name_, liquid_surf_no_sea_maps());
+        // Sea: the surf field's own rule (a map in water_surf_no_sea_maps or
+        // water_lake_maps has none: its open water holds freshwater species).
+        const bool takes_sea = liquid_surf_map_takes_sea(ambient_map_name_, liquid_surf_field_no_sea_maps());
         const std::uint64_t swim_key = splitmix(ambient_map_generation_ * 2 + (takes_sea ? 1u : 0u)) ^ ambient_liquid_level_updates_;
         if (cr.swim_key != swim_key) {
             cr.swim_key = swim_key; cr.swim.clear(); cr.water_level.clear(); cr.water_kind.clear();
@@ -5790,6 +5796,12 @@ HRESULT Renderer::render_critters(const FixedState& frame, const std::array<floa
         for (const auto& light : native_point_light_inputs_)
             if (light.spell) cr.spell_lights.push_back({light.center[0], light.center[1], light.radius});
         w.spell_lights = &cr.spell_lights; w.blasts = &cr.director.blasts;
+        if (fire_burn_bound_) {
+            w.fire = this;
+            w.fire_at = [](const void* r, float x, float y) { return static_cast<const Renderer*>(r)->fire_burning_at(x, y); };
+            w.fire_ignite = [](const void* r, float x, float y, float z, float scale) {
+                const_cast<Renderer*>(static_cast<const Renderer*>(r))->fire_ignite_flame(x, y, z, scale); };
+        }
         std::vector<std::size_t> members;   // live party members with a known vision range
         for (std::size_t i = 0; i < cr.units.size(); ++i)
             if (!cr.details[i].dead && cr.details[i].controlled && cr.details[i].vision > 0) members.push_back(i);
@@ -6867,7 +6879,7 @@ std::uint32_t Renderer::owned_shadow_casters_key() const noexcept {
         std::clamp(configured_integer(config, "ground_cover_shadows", 1), 0, 2) : 0;
     const bool critters = critters_ && !critters_failed_ && critters_->shadow_ready && critters_->first_swimmer != 0;
     return std::uint32_t(cover) | (gc_shadow_ready_ ? 4u : 0u) | (critters ? 8u : 0u) |
-        (configured_integer(config, "critters", 2) > 0 ? 16u : 0u);
+        (configured_integer(config, "critters", 2) > 0 ? 16u : 0u) | (fire_shadow_ids_.empty() ? 0u : 32u);
 }
 
 #endif

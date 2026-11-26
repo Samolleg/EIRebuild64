@@ -11,7 +11,7 @@
 namespace owned {
 
 struct WidescreenSettings {
-    widescreen::HudWidth hud = widescreen::HudWidth::wide_16_9;
+    widescreen::HudWidth hud = widescreen::HudWidth::full;
     int ui_scale_percent = 100;
 };
 
@@ -106,6 +106,26 @@ struct QuestItemSettings { float scale_percent=100.f, x_percent=-1.f, y_percent=
 void widescreen_set_quest_items(const QuestItemSettings& settings) noexcept;
 bool widescreen_hud_panel_bounds(HudPanel panel, HudPanelBounds& bounds) noexcept;
 void widescreen_hud_position_percent(HudPanel panel,float left,float top,float width,float height,float& x,float& y) noexcept;
+// The terms widescreen_hud_position_percent places a panel's rectangle by:
+// its placed content is (content_x*width, content_y*height) at the anchor
+// fraction (anchor_x, anchor_y) of the rectangle. Core mode sends them to the
+// host, whose HUD layout editor converts a dragged rectangle the same way.
+struct HudPositionTerms { float anchor_x=0.f, anchor_y=0.f, content_x=1.f, content_y=1.f; };
+HudPositionTerms widescreen_hud_position_terms(HudPanel panel) noexcept;
+inline void hud_position_percent(const HudPositionTerms& t,float layout_width,float layout_height,
+                                 float left,float top,float width,float height,float& x,float& y) noexcept {
+    const float cw=t.content_x*width,ch=t.content_y*height;
+    x=layout_width>cw?(left+t.anchor_x*(width-cw))*100.f/(layout_width-cw):0.f;
+    y=layout_height>ch?(top+t.anchor_y*(height-ch))*100.f/(layout_height-ch):0.f;
+    x=x<0.f?0.f:x>100.f?100.f:x;y=y<0.f?0.f:y>100.f?100.f:y;
+}
+// Core mode: one panel as the game process's HUD layout editor sees it
+// (scene_core::WidescreenState), for the host's editor overlay.
+struct HudEditorPanel {
+    HudPanelBounds bounds, header;
+    HudPositionTerms terms;
+    std::uint8_t valid=0, header_valid=0, reserved[2]{};
+};
 struct HudAssetFrame { HudPanelBounds bounds; float thickness=0.f; unsigned edges=15; bool portrait=false; float opacity=1.f; };
 void widescreen_hud_asset_frames(std::vector<HudAssetFrame>& frames);
 bool widescreen_hud_asset_frame(HudPanel panel,HudAssetFrame& frame) noexcept;

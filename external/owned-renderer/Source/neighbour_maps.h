@@ -72,6 +72,11 @@ bool build_native_prebuilt_texture(ID3D11Device* device, D3D12Preparer* d3d12, c
 void neighbour_texture_resident(const std::string& key, bool resident) noexcept;
 void neighbour_textures_clear() noexcept;
 bool neighbour_texture_is_resident(const std::string& key) noexcept;
+// The current stream's prebuilt decoration geometry (#289): every neighbour's
+// bytes, those beyond one copy among neighbours, and those of models the
+// main map also holds (main_has: "model/part|index count").
+void neighbour_prebuilt_duplicates(const std::function<bool(const std::string&)>& main_has,
+    std::uint64_t& total, std::uint64_t& across, std::uint64_t& with_main) noexcept;
 // The [RES] mounts of the current world (set when its stream starts); null
 // before the first world.
 std::shared_ptr<const ResourceStoreConfig> neighbour_world_mounts() noexcept;
@@ -82,9 +87,15 @@ struct NativePrebuiltBuilder {
     std::vector<NativePrebuiltPage> pages;
     bool failed = false;
 };
+// shared: another mesh of the same figure, built earlier into the builder's
+// open page. The new mesh then stores only its sphere block and positions and
+// reads every other channel (normals, components, texture coordinates,
+// indices, static LOD levels) from it. null, or shared on a finished page:
+// a complete mesh.
 bool build_native_prebuilt_mesh(NativePrebuiltBuilder& builder, const NativeGeometryView& view,
-    NativePrebuiltMesh& output) noexcept;
+    NativePrebuiltMesh& output, const NativePrebuiltMesh* shared = nullptr) noexcept;
 bool finish_native_prebuilt_pages(NativePrebuiltBuilder& builder) noexcept;
+std::size_t native_prebuilt_page_bytes() noexcept; // the page size a builder reserves
 // The shared mesh of a neighbour decoration figure at one exact shape: the
 // CPU's shape selection (positions), keyed by the figure and that shape
 // (get_native_mesh's shape_bits), so every node of every neighbour drawing the
@@ -104,7 +115,11 @@ struct NeighbourFigureShape {
 inline NeighbourFigureShape neighbour_figure_shape(const FigureCpuAsset* figure, const std::array<float, 3>& shape,
     const std::array<float, 4>* sphere = nullptr) noexcept {
     NeighbourFigureShape key{figure, {}, {}};
-    if(figure&&figure->shape_count!=1)std::memcpy(key.shape.data(), shape.data(), sizeof(key.shape));
+    // A one-shape figure's positions are the same at every shape: one mesh
+    // for all its nodes (#289: rocks and buildings were copied per object).
+    // A part of a morphing impostor object still differs by its sphere.
+    if (figure && figure->shape_count != 1)
+        if(figure&&figure->shape_count!=1)std::memcpy(key.shape.data(), shape.data(), sizeof(key.shape));
     if (sphere) std::memcpy(key.sphere.data(), sphere->data(), sizeof(key.sphere));
     return key;
 }

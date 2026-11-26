@@ -39,7 +39,7 @@ int run(const std::string& shaderPath, bool hardware, bool probe, bool posed = t
  NativeWorldVertexGpu vertices[8]{};NativeWorldStateGpu states[4]{};
  for(unsigned i=0;i<8;++i){vertices[i].position[0]=100.f*i+1;vertices[i].position[1]=100.f*i+2;vertices[i].position[2]=100.f*i+3;vertices[i].position[3]=1;
   vertices[i].texture_coordinate[0]=float(i)+.125f;vertices[i].texture_coordinate[1]=float(i)+.375f;for(auto& t:vertices[i].tangent)t=-999.f;}
- for(unsigned i=0;i<4;++i){states[i].geometry={1000*i+1,1000*i+2};states[i].pose={7000*i+3,7000*i+4};states[i].skn_lod=55;states[i].preparations=99;states[i].components=777;}
+ for(unsigned i=0;i<4;++i){states[i].geometry={1000*i+1,1000*i+2};states[i].pose={7000*i+3,7000*i+4};states[i].skn_lod=55;states[i].fault_corners=99;states[i].fault_component=777;}
  unsigned probes[4][4]={{0,1,2,0},{1,1001,1002,0},{3,999,999,0},{UINT_MAX,1,2,0}};
  // A different generation must stay rejected even with a valid state index.
  RaytracingRepackJob job{};job.row[0][0]=job.row[1][1]=job.row[2][2]=1;

@@ -196,6 +196,7 @@ struct Tumble {
     M3 rot;
     float scale = 1, alpha = 0, unseen = 0, peak = 0;   // unseen: game seconds off screen; peak: highest hop since the last push
     bool seen = false;                  // on screen at least once since it came
+    float burning = -1;                 // fire burn: game seconds since it caught (-1: not burning)
     double kicked = -1e9;
 };
 struct TumbleUnit { std::uint64_t id; float x, y, vx, vy; };
@@ -236,6 +237,7 @@ bool tumble_offscreen(const WorldView& w, float x, float y) {
     return std::abs(nx) > 1.15f || std::abs(ny) > 1.15f;
 }
 void tumble_start(TumbleWeeds& t, Tumble& b, float x, float y, float alpha) {
+    b.burning = -1;
     const std::uint64_t k = splitmix(t.seed ^ ++t.born);
     b = Tumble{};
     b.active = true; b.x = x; b.y = y; b.alpha = alpha;
@@ -349,7 +351,15 @@ void tumble_tick(TumbleWeeds& t, float dt, const WorldView& w, const WeatherWind
             }
             continue;
         }
-        b.alpha = b.leaving ? b.alpha - dt / kTumbleFadeOut : std::min(1.f, b.alpha + dt / kTumbleFadeIn);
+        // Fire burn: a ball on burning ground catches, burns with the game's
+        // fire (dry twigs: fast) and is gone in about 3 s (user, #254).
+        if (b.burning < 0 && w.fire_at && w.fire_at(w.fire, b.x, b.y)) {
+            b.burning = 0; b.leaving = true;
+            if (w.fire_ignite) w.fire_ignite(w.fire, b.x, b.y, kTumbleRadius * b.scale, .7f * b.scale);
+        }
+        if (b.burning >= 0) b.burning += dt;
+        b.alpha = b.burning >= 0 ? b.alpha - dt / 3.f
+            : b.leaving ? b.alpha - dt / kTumbleFadeOut : std::min(1.f, b.alpha + dt / kTumbleFadeIn);
         if (b.alpha <= 0) { b.active = false; continue; }
         // Shelter holds a resting ball in the lee against the steady wind,
         // but never fully: strong gusts still roll it out, a storm sooner.
