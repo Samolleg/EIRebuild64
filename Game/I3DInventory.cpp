@@ -269,32 +269,77 @@ void CI3DItemScreen::DrawUnit(CRenderer *pRend, CUnit *pDrawUnit, float fAngle, 
 static const D3DCOLORVALUE dcvMagicColors[] = { { 1, 0, 0, 1 }, { 0, 1, 1, 1 }, { 0, 1, 0, 1 },
                                                 { 1, 1, 0, 1 }, { 1, 1, 0, 1 }, { 1, 0, 1, 1 },
                                                 { 1, 0, 1, 1 }, { 0, 0, 1, 1 } };
+#include "OwnedRender/CampItemModel.inl"
 #include "OwnedRender/SinglePreview.inl"
-void CI3DItemScreen::DrawItem(CRenderer *pRend, SDrawItem &item)
+void CI3DItemScreen::BeginCampPreviews(int shop)
+{
+    owned::ResourceStoreConfig mounts;
+    std::uint64_t generation=0;
+    const bool available=owned::owned_resource_runtime_mounts(mounts,&generation);
+    const unsigned cellPixels=static_cast<unsigned>((pI3D->GetHeight()+5)/6);
+    if(!available || !pI3D->lastCampModels || shop!=pI3D->campModelShop ||
+       generation!=pI3D->campModelGeneration || pI3D->lastCampModels->cellPixels!=cellPixels) {
+        pI3D->lastCampModels=std::make_shared<CampItemModelCache>();
+        pI3D->lastCampModels->cellPixels=cellPixels;
+        pI3D->campModelShop=shop;pI3D->campModelGeneration=generation;
+    }
+    campItemModels=pI3D->lastCampModels;
+    campItemModels->cache.begin();
+}
+void CI3DItemScreen::FinishCampPreviews()
+{
+    const auto started=GetTickCount64();
+    const auto count=campItemModels->cache.finish();
+    GameJournal::Event("SHOP","preview_stock_ready","keys=%zu final_wait_ms=%llu",count,GetTickCount64()-started);
+}
+void CI3DItemScreen::PreloadCampParty(const CParty& party)
+{
+    if(!campItemModels) campItemModels=std::make_shared<CampItemModelCache>();
+    const auto queue=[&](const auto& items) {
+        for(int i=0;i<items.GetSize();++i) if(items[i]) campItemModels->find(*items[i],true);
+    };
+    for(int i=0;i<party.people.GetSize();++i) {
+        queue(party.people[i].weapons);
+        queue(party.people[i].armors);
+    }
+    queue(party.allWagonItems);
+}
+void CI3DItemScreen::DrawItem(CRenderer *pRend, SDrawItem &item, std::vector<std::string>* visibleLegacyIcons)
 {
     if (!item.pItem) return;
     owned::camp::Composition campPlacement;
     const bool campPlaced = E4CampAccess::ItemPlacement(this, item, campPlacement);
     owned::camp::VisualScope campVisual(campPlaced ? campPlacement : owned::camp::visual, campPlaced || owned::camp::composing);
-    if (!figuresLRU.Contains(item.pItem->GetI3DFigureName())) OwnedRender::E4::FigureMiss();
-    owned::ModelDrawReference figureLifetime;
-    CI3DFigure *pFig = figuresLRU.GetObject(item.pItem->GetI3DFigureName(), [&](CI3DFigure* figure) {
-        figureLifetime.hold(figure,
-            [](void* value) noexcept { static_cast<CI3DFigure*>(value)->AddRef(); },
-            [](void* value) noexcept { static_cast<CI3DFigure*>(value)->Release(); });
-    });
-    CTexture *pTex = nullptr;
-    std::shared_ptr<const owned::PreparedCampIcon> campIcon;
-    if (OwnedRender::E4::OwnsDraw()) {
-        campIcon = owned::camp_inventory_request_icon(item.pItem->GetI3DTextureName(),pRend->GetD3D()->GetDevice().Get());
-        if (!pFig || !campIcon) return; // Pending or rejected icons are omitted; never use OpenEI.
-    } else {
-        OwnedRender::E4::MissCost textureMiss(!texturesLRU.Contains(item.pItem->GetI3DTextureName()));
-        pTex = texturesLRU.GetObject(item.pItem->GetI3DTextureName());
-        if (!pFig || !CTextureLRUAllocator::EnsureReady(pTex)) return;
+    CampPreviewSelection<CampItemModel> selection{nullptr,true};
+    if (dynamic_cast<CI3DScreenCamp*>(this)) {
+        if (!campItemModels) campItemModels=std::make_shared<CampItemModelCache>();
+        selection=campItemModels->find(*item.pItem);
     }
-    pFig->SetTexture(pTex);
-    pFig->SetMaterial(pMat1);
+    owned::ModelDrawReference figureLifetime;
+    CI3DFigure* pFig=nullptr;
+    std::shared_ptr<const owned::PreparedCampIcon> campIcon;
+    const auto& model=selection.model;
+    if (selection.useFigure) {
+        if (!figuresLRU.Contains(item.pItem->GetI3DFigureName())) OwnedRender::E4::FigureMiss();
+        pFig = figuresLRU.GetObject(item.pItem->GetI3DFigureName(), [&](CI3DFigure* figure) {
+            figureLifetime.hold(figure,
+                [](void* value) noexcept { static_cast<CI3DFigure*>(value)->AddRef(); },
+                [](void* value) noexcept { static_cast<CI3DFigure*>(value)->Release(); });
+        });
+        CTexture *pTex = nullptr;
+        if (OwnedRender::E4::OwnsDraw()) {
+            const auto textureName=item.pItem->GetI3DTextureName();
+            if(visibleLegacyIcons) visibleLegacyIcons->emplace_back(LPCSTR(textureName));
+            campIcon = owned::camp_inventory_request_icon(textureName,pRend->GetD3D()->GetDevice().Get());
+            if (!pFig || !campIcon) return; // Pending or rejected icons are omitted; never use OpenEI.
+        } else {
+            OwnedRender::E4::MissCost textureMiss(!texturesLRU.Contains(item.pItem->GetI3DTextureName()));
+            pTex = texturesLRU.GetObject(item.pItem->GetI3DTextureName());
+            if (!pFig || !CTextureLRUAllocator::EnsureReady(pTex)) return;
+        }
+        pFig->SetTexture(pTex);
+        pFig->SetMaterial(pMat1);
+    }
     if (item.pItem->GetUserData() == 0)
     {
         CRotateItem *pInfo = dbgnew CRotateItem;
@@ -333,18 +378,21 @@ void CI3DItemScreen::DrawItem(CRenderer *pRend, SDrawItem &item)
             }
         }
     }
-    if (!facts.slot) {
+    if (!facts.slot && model) {
+        facts.bounds_max=model->cardMax;facts.bounds_center=model->cardCenter;
+    } else if (!facts.slot && pFig) {
         const auto* bounds=pFig->GetBoundingVolume();
         facts.bounds_max={bounds->ptMax.x,bounds->ptMax.y};
         facts.bounds_center={bounds->ptCenter.x,bounds->ptCenter.y};
     }
+    if (!pFig && !model) facts.bounds_max={1,1};
     if (IsItemSpell(item.pItem)) {
         if (const auto* spell=item.pItem->GetSpell(0)) facts.rune_count=spell->GetRunesCount();
     }
     auto* info=static_cast<CRotateItem*>(item.pItem->GetUserData());
     OwnedRender::SinglePreviewRotationState rotation{info->fAngle,info->fSpeed,info->fFlashVal};
     SourceSinglePreview adapter{this,pRend,pFig,textures[2],textures[1]};
-    adapter.item=&item;adapter.state=info;adapter.campPlaced=campPlaced;adapter.icon=campIcon;
+    adapter.item=&item;adapter.model=model.get();adapter.state=info;adapter.campPlaced=campPlaced;adapter.icon=campIcon;
     OwnedRender::produce_single_item_preview(facts,rotation,adapter);
 }
 /////////////////////////////////////////////////////////////////////////////////////

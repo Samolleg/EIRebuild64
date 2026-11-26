@@ -491,6 +491,10 @@ struct RetainedVisualSample {
     // Embedded units use the host's completed pose/materials, not the retail
     // route/intent evaluator. Their rendering still follows unit policy.
     bool completed_pose = false;
+    bool riding = false;
+    bool riding_calm = false;
+    int rideTransition = 0; // Signed flank, magnitude 1 to mount or 2 to dismount.
+    float rideProgress = 0.f;
     VisualResourceIncarnation resource{};
     LifecycleIdentity lifecycle{};
     RetainedVisualStatus status = RetainedVisualStatus::awaiting_values;

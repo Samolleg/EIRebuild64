@@ -4,6 +4,7 @@
 #include "OwnedRender/ModelPreviewVisualRole.h"
 namespace owned { struct ModelPreviewViews; struct VisualAssemblyAsset; struct VisualClipVisibility; struct VisualClipSelection; }
 
+#include "riding_idle.h"
 #include "Object.h"
 #include "Material.h"
 #include "Texture.h"
@@ -76,6 +77,7 @@ private:
     CString szPrimaryTextureName;   // primary texture name (for further loading)
     CString szSecondaryTextureName; // secondary texture name (for further loading)
     //
+    std::vector<CRect> nativePickParts;
     float fpTime;
     DWORD dwLastLightTime; // time, then this object was relighted (in milliseconds)
     struct NeutralPose {
@@ -84,6 +86,8 @@ private:
         DWORD flags = 0;
         SComplection shape{};
     } neutralPose;
+    std::shared_ptr<const owned::environment::Asset> nativePose;
+    owned::gltf::RidingIdleState nativeRidingIdle;
     bool ownedAppearanceAttempted = false;
     std::uint64_t ownedAppearanceRevision = 0;
     //

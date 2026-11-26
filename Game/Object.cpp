@@ -5,6 +5,7 @@ static const char LOCAL_FILE[] = __FILE__;
 
 #include "Object.h"
 #include "environment_asset.h"
+#include "GameJournal.h"
 #include "Object3DClientSpecific.h"
 #include "model_draw.h"
 #include "OwnedRender/E1Scene.h"
@@ -837,7 +838,7 @@ BOOL CObject3D::LinkFigure(CFigure *lpFigure)
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CObject3D::LoadAnimation(LPCSTR pszTemplate, const SADEntry *lpNewEntry)
 {
-    if (environmentAsset) return TRUE;
+    if (environmentAsset && !environmentAsset->native_model) return TRUE;
     if (lpAnimationSystem)
         lpAnimationSystem->SetAnimation(lpNewEntry);
 
@@ -1112,10 +1113,17 @@ CParticle* CObject3D::FindPowerHitGlow(int hit){for(POSITION pos=particles.GetHe
 
 bool CObject3D::LoadEnvironment(LPCSTR name, const CStringArray* selected)
 {
-    if (WhoAmI()==HPC_UNIT) return false;
-    auto asset=owned::environment::select(name);
+    owned::environment::ModelView view;
+    view.shape={complection.strength,complection.grace,complection.tall};
+    if(auto* client=dynamic_cast<CObject3DClientSpecific*>(GetObjectSpecific())){
+        view.primary=client->GetPrimaryTextureName().GetString();
+        view.secondary=client->GetSecondaryTextureName().GetString();
+    }
+    auto asset=owned::environment::select(name,view);
+    if(asset && asset->native_model)GameJournal::Event("MODEL","resolved","id=%d name=%s primary=%s secondary=%s parts=%u",GetID(),name,view.primary.c_str(),view.secondary.c_str(),unsigned(asset->parts.size()));
+    if(asset && WhoAmI()==HPC_UNIT && !asset->native_model)return false;
     if (!asset) { environmentAsset.reset();environmentSelection.clear();return false; }
-    if (WhoAmI()!=HPC_BUILDING && WhoAmI()!=HPC_STONE && WhoAmI()!=HPC_STUFF_OBJECT && WhoAmI()!=HPC_TREE)
+    if (!asset->native_model && WhoAmI()!=HPC_BUILDING && WhoAmI()!=HPC_STONE && WhoAmI()!=HPC_STUFF_OBJECT && WhoAmI()!=HPC_TREE)
         throw std::runtime_error("environment GLB: this object class is not in the rigid slice");
     std::vector<std::string> selection;
     if (selected) for(INT_PTR i=0;i<selected->GetSize();++i) {
@@ -1154,6 +1162,7 @@ bool CObject3D::LoadEnvironment(LPCSTR name, const CStringArray* selected)
     const CPlot3D hi(maximum[0],maximum[1],maximum[2]);
     const auto center=(lo+hi)*.5f;bv=SBoundingVolume{};
     bv.SetCenter(center);bv.SetBox(lo-center,hi-center);bv.SetRadius(fabs(hi-center));
-    SetFlag(OBJ_LOADED|OBJ_STATIC);
+    SetFlag(OBJ_LOADED);
+    if(WhoAmI()!=HPC_UNIT)SetFlag(OBJ_STATIC);
     return true;
 }

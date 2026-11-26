@@ -1,4 +1,5 @@
 #include "environment_asset.h"
+#include "gltf_animation.h"
 #include "owned_resource_runtime.h"
 #include "../../../dependencies/cgltf/v1.15/cgltf.h"
 #include "../../../SDKs/JSON/json.hpp"
@@ -27,6 +28,7 @@ std::vector<float> values(const cgltf_accessor* accessor,unsigned width) {
     std::vector<float> result(accessor->count*width);
     require(cgltf_accessor_unpack_floats(accessor,result.data(),result.size())==result.size(),"sparse/dense accessor decode");return result;
 }
+#include "gltf_scene_pose.inl"
 void pack(std::vector<NativePackedGroup>& out,unsigned groups,unsigned shape,unsigned i,const std::array<float,3>& p){
     auto& g=out[shape*groups+i/4];unsigned k=i%4;g.x[k]=p[0];g.y[k]=p[1];g.z[k]=p[2];g.w[k]=1;
 }
@@ -41,24 +43,55 @@ ResourceBlob read(ResourceStore& store,const std::string& key) {
 #endif
 }
 
-std::shared_ptr<const Asset> decode(const ResourceBlob& blob,const std::string& visual) {
+struct ModelMotion {
+    struct Primitive {
+        size_t node=0;
+        std::vector<float> positions,normals,joints,weights;
+        struct Morph {std::vector<float> positions,normals;};
+        std::vector<Morph> morphs;
+    };
+    ResourceBlob blob;
+    std::shared_ptr<cgltf_data> document;
+    ScenePose::Clips clips;
+    std::unique_ptr<SceneForm> form;
+    std::vector<Primitive> parts;
+};
+
+std::shared_ptr<const Asset> decode(const ResourceBlob& blob,const std::string& visual,const ModelView* view) {
     require(blob.bytes&&blob.bytes->size()<=64u*1024*1024,"GLB byte budget");
     cgltf_options options{};cgltf_data* raw=nullptr;
     require(cgltf_parse(&options,blob.bytes->data(),blob.bytes->size(),&raw)==cgltf_result_success,"parse");
     std::unique_ptr<cgltf_data,decltype(&cgltf_free)> owner(raw,cgltf_free);auto& d=*raw;
     require(d.file_type==cgltf_file_type_glb&&d.buffers_count==1&&!d.buffers[0].uri,"embedded GLB buffer");
-    require(!d.skins_count&&!d.animations_count&&d.nodes_count<=4096,"static scene: no skins/animations");
+    require((view||(!d.skins_count&&!d.animations_count))&&d.nodes_count<=4096,"static scene: no skins/animations");
     for(size_t i=0;i<d.nodes_count;++i){size_t depth=0;for(auto* n=&d.nodes[i];n;n=n->parent)require(++depth<=64,"cyclic/deep node hierarchy");}
     for(size_t i=0;i<d.extensions_required_count;++i){
         const std::string name=d.extensions_required[i];
-        require(name=="MSFT_texture_dds"||name=="KHR_materials_unlit"||name=="KHR_materials_emissive_strength"||name=="KHR_texture_transform","required extension "+name);
+        require((view&&name=="KHR_materials_variants")||name=="MSFT_texture_dds"||name=="KHR_materials_unlit"||name=="KHR_materials_emissive_strength"||name=="KHR_texture_transform","required extension "+name);
     }
     require(cgltf_load_buffers(&options,&d,nullptr)==cgltf_result_success&&cgltf_validate(&d)==cgltf_result_success,"accessors/buffers");
-    const auto meta=metadata(d.asset.extras);require(meta.at("profile")=="environment.v1"&&meta.at("kind")=="environment","profile/kind");
+    const auto meta=view?Json::object():metadata(d.asset.extras);if(!view)require(meta.at("profile")=="environment.v1"&&meta.at("kind")=="environment","profile/kind");
     const bool forms=meta.value("shape",std::string())=="trilinear8";
     auto* scene=d.scene?d.scene:(d.scenes_count==1?d.scenes:nullptr);require(scene,"unambiguous scene");
     auto out=std::make_shared<Asset>();out->identity=blob.identity;
     out->minimum={FLT_MAX,FLT_MAX,FLT_MAX};out->maximum={-FLT_MAX,-FLT_MAX,-FLT_MAX};
+    std::unique_ptr<ScenePose> pose;
+    std::shared_ptr<ModelMotion> motion;
+    if(view){
+        out->native_model=true;out->view=*view;
+        motion=std::make_shared<ModelMotion>();motion->blob=blob;
+        motion->document={owner.release(),cgltf_free};motion->clips=ScenePose::loadClips(d);
+        for(const auto& clip:motion->clips)out->clip_lengths.emplace(clip.first,clip.second.duration);
+        if(d.asset.extras.data){
+            auto extra=Json::parse(d.asset.extras.data);
+            if(extra.is_object() && extra.contains("ei") && extra.at("ei").contains("bindings"))
+                for(const auto& b:extra.at("ei").at("bindings"))if(b.contains("legacyClip")&&b.contains("clip"))
+                    out->clip_bindings[lower(b.at("legacyClip").get<std::string>())]=lower(b.at("clip").get<std::string>());
+        }
+        motion->form=std::make_unique<SceneForm>(d,view->shape);
+        pose=std::make_unique<ScenePose>(d,motion->clips,view->clip,view->seconds,*motion->form);
+        if(!motion->clips.empty())out->motion=motion;
+    }
     if(meta.contains("wind")){
         const auto& w=meta.at("wind");out->plant=w.value("enabled",true);out->wind_root=vector3(w.value("root",Json::array({0,0,0})));
         if(w.contains("shapes"))for(const auto& s:w.at("shapes"))out->wind.push_back(vector3(s));
@@ -73,32 +106,45 @@ std::shared_ptr<const Asset> decode(const ResourceBlob& blob,const std::string& 
     std::set<const TextureCpuAsset*> countedTextures;
     std::set<const cgltf_node*> visited;std::set<std::string> names;
     std::function<void(const cgltf_node*,unsigned)> visit=[&](const cgltf_node* node,unsigned depth){
-        require(depth<64&&visited.insert(node).second,"cyclic/repeated scene node");require(!node->skin,"rigid node");
+        require(depth<64&&visited.insert(node).second,"cyclic/repeated scene node");require(view||!node->skin,"rigid node");
         if(node->mesh) {
-            require(node->name&&*node->name,"named mesh node");const std::string logical=node->name;
+            require(view||(node->name&&*node->name),"named mesh node");const std::string logical=node->name?node->name:std::string("node-")+std::to_string(node-d.nodes);
             require(logical.find('#')==std::string::npos&&names.insert(lower(logical)).second,"unique logical node name");
-            const auto nm=metadata(node->extras);const auto c=nm.at("collision");
+            const auto extra=view && node->extras.data?Json::parse(node->extras.data):Json::object();
+            const auto nm=view?extra.value("ei",Json::object()):metadata(node->extras);
+            const unsigned slot=view?nm.value("materialSlot",0u):0;
+            require(slot<=2,"material slot");
+            const auto choice=slot?lower(slot==1?view->primary:view->secondary):std::string{};
+            const bool visible=!(view && nm.value("optional",false) && (choice.empty()||choice=="none"));
+            const bool autoBounds=view&&!nm.contains("collision");
+            const auto c=autoBounds?Json{{"role","solid"}}:nm.at("collision");
             const auto role=c.at("role").get<std::string>();
             require(role=="none"||role=="solid"||role=="crown"||role=="walkable","collision role");
             std::vector<FigureBounds> cb;
-            if(c.contains("shapes"))for(const auto& b:c.at("shapes"))cb.push_back(bounds(b));else cb.push_back(bounds(c));
+            if(c.contains("shapes"))for(const auto& b:c.at("shapes"))cb.push_back(bounds(b));else cb.push_back(autoBounds?FigureBounds{}:bounds(c));
             require(cb.size()==1||(forms&&cb.size()==8),"collision shape count");
-            float m[16]{};cgltf_node_transform_world(node,m);
+            float m[16]{};if(pose)std::copy_n(pose->world.at(node-d.nodes).begin(),16,m);else cgltf_node_transform_world(node,m);
+            const auto palette=node->skin?pose->palette(d,*node->skin):std::vector<ScenePose::Matrix>{};
             const std::array<float,9> cof={m[5]*m[10]-m[6]*m[9],m[6]*m[8]-m[4]*m[10],m[4]*m[9]-m[5]*m[8],
                 m[9]*m[2]-m[10]*m[1],m[10]*m[0]-m[8]*m[2],m[8]*m[1]-m[9]*m[0],
                 m[1]*m[6]-m[2]*m[5],m[2]*m[4]-m[0]*m[6],m[0]*m[5]-m[1]*m[4]};
             const float det=m[0]*cof[0]+m[1]*cof[1]+m[2]*cof[2];require(std::isfinite(det)&&std::abs(det)>1e-12f,"singular transform");
             for(size_t pi=0;pi<node->mesh->primitives_count;++pi) {
                 require(out->parts.size()<128,"part budget");const auto& p=node->mesh->primitives[pi];
+                const cgltf_material* selectedMaterial=p.material;
+                if(slot&&!choice.empty())for(size_t k=0;k<p.mappings_count;++k){
+                    const auto& map=p.mappings[k];const auto& variant=d.variants[map.variant];
+                    if(variant.name&&lower(variant.name)==choice){selectedMaterial=map.material;break;}
+                }
                 require(p.type==cgltf_primitive_type_triangles&&!p.has_draco_mesh_compression,"plain triangles");
-                require(p.targets_count==0||(forms&&p.targets_count==7),"shape requires seven endpoint-delta morph targets");
-                const unsigned shapes=p.targets_count?8:1;
-                for(size_t a=0;a<p.attributes_count;++a)require(p.attributes[a].type==cgltf_attribute_type_position||p.attributes[a].type==cgltf_attribute_type_normal||
+                require(view||p.targets_count==0||(forms&&p.targets_count==7),"shape requires seven endpoint-delta morph targets");
+                const unsigned shapes=!view&&p.targets_count?8:1;
+                for(size_t a=0;a<p.attributes_count;++a)require(view||p.attributes[a].type==cgltf_attribute_type_position||p.attributes[a].type==cgltf_attribute_type_normal||
                     p.attributes[a].type==cgltf_attribute_type_texcoord||p.attributes[a].type==cgltf_attribute_type_tangent,"prepare vertex colours before export");
                 const auto* pos=cgltf_find_accessor(&p,cgltf_attribute_type_position,0);
                 const auto* nor=cgltf_find_accessor(&p,cgltf_attribute_type_normal,0);
-                auto& mat=materials[p.material];if(!mat) {
-                    mat=material(p.material,blob.identity,d);
+                auto& mat=materials[selectedMaterial];if(!mat) {
+                    mat=material(selectedMaterial,blob.identity,d);
                     for(const auto& t:mat->textures)if(t&&countedTextures.insert(t->asset.get()).second)out->texture_bytes+=t->asset->source->size();
                     require(out->texture_bytes<=128u*1024*1024,"decoded texture budget");
                 }
@@ -112,7 +158,7 @@ std::shared_ptr<const Asset> decode(const ResourceBlob& blob,const std::string& 
                 part.opacity=c.value("opacity",role=="crown"||role=="none"?2u:0u);
                 require(part.passability<=3&&part.opacity<=3,"collision passability/opacity");
                 part.foliage=nm.value("foliage",role=="crown");
-                part.render=nm.value("render",true);
+                part.render=visible&&nm.value("render",true);
                 part.pbr=mat;part.texture=mat->textures[0]->asset;
                 if(p.material) {
                     const auto& mr=p.material->pbr_metallic_roughness;
@@ -122,6 +168,8 @@ std::shared_ptr<const Asset> decode(const ResourceBlob& blob,const std::string& 
                 auto legacy=std::make_shared<MaterialCpuAsset>();legacy->source=MaterialValueSource::completed_native;
                 legacy->diffuse=legacy->ambient={1,1,1,1};legacy->specular={0,0,0,1};legacy->emissive={0,0,0,1};part.material=legacy;
                 auto mesh=std::make_shared<FigureCpuAsset>();mesh->identity=blob.identity;mesh->identity.canonical_name+="#environment/"+part.name;
+                if(view && view->shape!=std::array<float,3>{.5f,.5f,.5f})
+                    mesh->identity.canonical_name+="/form/"+Json(view->shape).dump();
                 mesh->signature=shapes==1?0x31474946u:0x38474946u;mesh->shape_count=shapes;
                 const unsigned count=unsigned(pos->count);mesh->position_groups=mesh->normal_groups=(count+3)/4;
                 mesh->positions.resize(shapes*mesh->position_groups);mesh->normals.resize(shapes*mesh->normal_groups);
@@ -132,7 +180,34 @@ std::shared_ptr<const Asset> decode(const ResourceBlob& blob,const std::string& 
                 for(float index:sparseIndices)require(std::isfinite(index)&&index>=0&&index<float(count)&&std::floor(index)==index,"sparse index range");
                 for(size_t k=0;k<indexCount;++k){const auto index=sparseIndices.empty()?(p.indices?cgltf_accessor_read_index(p.indices,k):k):cgltf_size(sparseIndices[k]);require(index<count,"index range");mesh->indices.push_back(std::uint16_t(index));}
                 if(det<0)for(size_t k=0;k<mesh->indices.size();k+=3)std::swap(mesh->indices[k+1],mesh->indices[k+2]);
-                const auto basePositions=values(pos,3),baseNormals=values(nor,3),texcoords=values(uv,2);
+                auto basePositions=values(pos,3),baseNormals=values(nor,3);const auto texcoords=values(uv,2);
+                if(out->motion){
+                    ModelMotion::Primitive source;source.node=size_t(node-d.nodes);
+                    source.positions=basePositions;source.normals=baseNormals;
+                    source.joints=values(cgltf_find_accessor(&p,cgltf_attribute_type_joints,0),4);
+                    source.weights=values(cgltf_find_accessor(&p,cgltf_attribute_type_weights,0),4);
+                    source.morphs.resize(p.targets_count);
+                    for(size_t t=0;t<p.targets_count;++t)for(size_t a=0;a<p.targets[t].attributes_count;++a){
+                        const auto& attr=p.targets[t].attributes[a];
+                        if(attr.type==cgltf_attribute_type_position)source.morphs[t].positions=values(attr.data,3);
+                        if(attr.type==cgltf_attribute_type_normal)source.morphs[t].normals=values(attr.data,3);
+                    }
+                    motion->parts.push_back(std::move(source));
+                }
+                if(pose){
+                    const auto& ws=pose->weights[node-d.nodes];
+                    for(unsigned t=0;t<p.targets_count && t<ws.size();++t)if(ws[t]!=0)
+                        for(size_t a=0;a<p.targets[t].attributes_count;++a){
+                            const auto& attr=p.targets[t].attributes[a];
+                            if(attr.type!=cgltf_attribute_type_position&&attr.type!=cgltf_attribute_type_normal)continue;
+                            auto& dst=attr.type==cgltf_attribute_type_position?basePositions:baseNormals;
+                            const auto delta=values(attr.data,3);require(delta.size()==dst.size(),"morph width");
+                            for(size_t v=0;v<dst.size();++v)dst[v]+=ws[t]*delta[v];
+                        }
+                }
+                const auto joints=values(cgltf_find_accessor(&p,cgltf_attribute_type_joints,0),4);
+                const auto weights=values(cgltf_find_accessor(&p,cgltf_attribute_type_weights,0),4);
+                require(!node->skin||(joints.size()==4*count&&weights.size()==4*count),"skin attributes");
                 for(unsigned shape=0;shape<shapes;++shape) {
                     const cgltf_accessor *dp=nullptr,*dn=nullptr;
                     if(shape)for(size_t a=0;a<p.targets[shape-1].attributes_count;++a){const auto& attr=p.targets[shape-1].attributes[a];
@@ -148,6 +223,19 @@ std::shared_ptr<const Asset> decode(const ResourceBlob& blob,const std::string& 
                         const float x=m[0]*point[0]+m[4]*point[1]+m[8]*point[2]+m[12],y=m[1]*point[0]+m[5]*point[1]+m[9]*point[2]+m[13],z=m[2]*point[0]+m[6]*point[1]+m[10]*point[2]+m[14];
                         std::array<float,3> v{x-out->wind_root[0],-z-out->wind_root[1],y-out->wind_root[2]};
                         float n[3]{};for(unsigned a=0;a<3;++a)n[a]=(cof[a]*normal[0]+cof[3+a]*normal[1]+cof[6+a]*normal[2])/det;
+                        if(node->skin){
+                            std::array<float,3> xyz{},nn{};float sum=0;
+                            for(unsigned k=0;k<4;++k){const auto ji=joints[i*4+k];const auto w=weights[i*4+k];
+                                if(!w)continue;
+                                require(w>0 && ji>=0 && ji<palette.size() && ji==std::floor(ji),"skin influence");
+                                const auto& bone=palette[unsigned(ji)];sum+=w;
+                                for(unsigned a=0;a<3;++a){
+                                    xyz[a]+=w*(bone[a]*point[0]+bone[4+a]*point[1]+bone[8+a]*point[2]+bone[12+a]);
+                                    nn[a]+=w*(bone[a]*normal[0]+bone[4+a]*normal[1]+bone[8+a]*normal[2]);
+                                }
+                            }
+                            require(sum>0,"unweighted skin point");v={xyz[0]/sum,-xyz[2]/sum,xyz[1]/sum};std::copy(nn.begin(),nn.end(),n);
+                        }
                         const float length=std::sqrt(n[0]*n[0]+n[1]*n[1]+n[2]*n[2]);require(std::isfinite(length)&&length>1e-12f,"normal");
                         pack(mesh->positions,mesh->position_groups,shape,i,v);pack(mesh->normals,mesh->normal_groups,shape,i,{n[0]/length,-n[2]/length,n[1]/length});
                         float radius2=0;
@@ -159,6 +247,7 @@ std::shared_ptr<const Asset> decode(const ResourceBlob& blob,const std::string& 
                     }
                     vb.radius=mesh->shape_position_radii[shape];mesh->bounds.push_back(vb);
                 }
+                if(autoBounds){cb=mesh->bounds;part.collision=cb;part.minimum=cb[0].minimum;part.maximum=cb[0].maximum;}
                 for(const auto& b:cb)for(unsigned a=0;a<3;++a){out->minimum[a]=(std::min)(out->minimum[a],b.minimum[a]);out->maximum[a]=(std::max)(out->maximum[a],b.maximum[a]);}
                 // Private CPU endpoints. Rendering resolves these into ordinary
                 // one-shape geometry before publishing an assembly.
@@ -176,15 +265,91 @@ std::shared_ptr<const Asset> decode(const ResourceBlob& blob,const std::string& 
     return out;
 }
 
+std::shared_ptr<const Asset> sample_model(const std::shared_ptr<const Asset>& base,const std::string& clip,float seconds){
+    if(!base || !base->motion || clip.empty())return base;
+    const auto& motion=*base->motion;const auto& d=*motion.document;
+    ScenePose pose(d,motion.clips,clip,seconds,*motion.form);
+    auto out=std::make_shared<Asset>(*base);out->view.clip=clip;out->view.seconds=seconds;
+    std::map<const cgltf_skin*,std::vector<ScenePose::Matrix>> palettes;
+    for(size_t pi=0;pi<out->parts.size();++pi){
+        auto& part=out->parts[pi];if(!part.render)continue;
+        const auto& src=motion.parts[pi];const auto* skin=d.nodes[src.node].skin;
+        const auto& world=pose.world[src.node];const auto& morphWeights=pose.weights[src.node];
+        const std::vector<ScenePose::Matrix>* palette=nullptr;
+        if(skin){
+            auto it=palettes.find(skin);
+            if(it==palettes.end())it=palettes.emplace(skin,pose.palette(d,*skin)).first;
+            palette=&it->second;
+        }
+        auto mesh=std::make_shared<FigureCpuAsset>(*part.geometry);
+        mesh->identity.canonical_name+="/pose/"+clip+"/"+std::to_string(seconds);
+        FigureBounds b;b.minimum={FLT_MAX,FLT_MAX,FLT_MAX};b.maximum={-FLT_MAX,-FLT_MAX,-FLT_MAX};
+        float radius2=0;
+        for(unsigned i=0;i<mesh->components.size();++i){
+            float p[3],n[3];
+            for(unsigned a=0;a<3;++a){
+                const auto k=3*i+a;p[a]=src.positions[k];n[a]=src.normals[k];
+                for(size_t t=0;t<morphWeights.size()&&t<src.morphs.size();++t){
+                    const auto& m=src.morphs[t];
+                    if(!m.positions.empty())p[a]+=morphWeights[t]*m.positions.at(k);
+                    if(!m.normals.empty())n[a]+=morphWeights[t]*m.normals.at(k);
+                }
+            }
+            auto m=world;
+            if(palette){m={};float sum=0;
+                for(unsigned k=0;k<4;++k){
+                    const float w=src.weights[4*i+k];if(!w)continue;sum+=w;
+                    const auto& bone=palette->at(size_t(src.joints[4*i+k]));
+                    for(unsigned j=0;j<15;++j)m[j]+=w*bone[j];
+                }
+                require(sum>0,"skin weight sum");for(auto& x:m)x/=sum;
+            }
+            const float x=m[0]*p[0]+m[4]*p[1]+m[8]*p[2]+m[12];
+            const float y=m[1]*p[0]+m[5]*p[1]+m[9]*p[2]+m[13];
+            const float z=m[2]*p[0]+m[6]*p[1]+m[10]*p[2]+m[14];
+            std::array<float,3> v{x,-z,y},normal{};
+            // Cofactors of the actual blended linear transform, including nonuniform scale.
+            const std::array<float,9> cof={m[5]*m[10]-m[6]*m[9],m[6]*m[8]-m[4]*m[10],m[4]*m[9]-m[5]*m[8],
+                m[9]*m[2]-m[10]*m[1],m[10]*m[0]-m[8]*m[2],m[8]*m[1]-m[9]*m[0],
+                m[1]*m[6]-m[2]*m[5],m[2]*m[4]-m[0]*m[6],m[0]*m[5]-m[1]*m[4]};
+            const auto det=m[0]*cof[0]+m[1]*cof[1]+m[2]*cof[2];
+            for(unsigned a=0;a<3;++a){
+                normal[a]=cof[a]*n[0]+cof[a+3]*n[1]+cof[a+6]*n[2];
+                b.minimum[a]=(std::min)(b.minimum[a],v[a]);b.maximum[a]=(std::max)(b.maximum[a],v[a]);
+            }
+            float len=std::sqrt(normal[0]*normal[0]+normal[1]*normal[1]+normal[2]*normal[2]);
+            if(det<0)len=-len;
+            if(std::abs(len)>1e-12f)for(auto& a:normal)a/=len;
+            pack(mesh->positions,mesh->position_groups,0,i,v);
+            pack(mesh->normals,mesh->normal_groups,0,i,{normal[0],-normal[2],normal[1]});
+            radius2=(std::max)(radius2,x*x+y*y+z*z);
+        }
+        b.radius=std::sqrt(radius2);mesh->bounds[0]=b;mesh->shape_position_radii[0]=b.radius;part.geometry=std::move(mesh);
+    }
+    return out;
+}
+
 #ifndef ENVIRONMENT_ASSET_CHECK
 namespace {
-std::string reference(ResourceStore& store,const std::string& visual) {
+std::string reference(ResourceStore& store,const std::string& visual,ModelView* general=nullptr,bool* native=nullptr) {
     ResourceBlob registryBlob;ResourceFailure failure;
     if(!store.resolve("models/registry.v1.json",registryBlob,failure)){require(failure.code==ResourceFailureCode::not_found,"registry read");return {};}
     static std::mutex lock;static std::map<std::string,Json> registries;
     std::lock_guard<std::mutex> guard(lock);const auto key=registryBlob.identity.key();
     if(!registries.count(key)){if(registries.size()>=16)registries.erase(registries.begin());registries.emplace(key,Json::parse(registryBlob.bytes->begin(),registryBlob.bytes->end()));}
     const auto& registry=registries.at(key);require(registry.at("version")==1,"registry version");
+    if(registry.contains("models")){
+        const auto& models=registry.at("models");require(models.is_object(),"model registry");
+        const auto it=models.find(lower(visual));
+        if(it!=models.end()){
+            const auto path=it->at("resource").get<std::string>();
+            require(path.rfind("models/",0)==0&&path.size()>4&&path.substr(path.size()-4)==".glb"&&
+                path.find("..")==std::string::npos&&path.find(':')==std::string::npos&&path.find(char(92))==std::string::npos,"model resource path");
+            if(native)*native=true;
+            if(general && general->clip.empty())general->clip=it->value("defaultAnimation",std::string{});
+            return path;
+        }
+    }
     if(!registry.contains("environment"))return {};
     const auto& entries=registry.at("environment");require(entries.is_object(),"environment registry");
     const auto it=entries.find(lower(visual));if(it==entries.end())return {};
@@ -195,27 +360,27 @@ std::string reference(ResourceStore& store,const std::string& visual) {
 }
 }
 bool assigned(ResourceStore& store,const std::string& visual){return !reference(store,visual).empty();}
-std::shared_ptr<const Asset> select(ResourceStore& store,const std::string& visual) {
-    const auto path=reference(store,visual);if(path.empty())return {};
+std::shared_ptr<const Asset> select(ResourceStore& store,const std::string& visual,const ModelView& view) {
+    auto effective=view;bool native=false;const auto path=reference(store,visual,&effective,&native);if(path.empty())return {};
     ResourceLocation location;ResourceFailure failure;require(store.locate(path,location,failure),"resource "+path+": "+failure.message);
     auto identity=location.identity();const bool physical=identity.container_file_key!=0;
     if(physical)identity.container_incarnation=identity.container_file_key;
-    const auto key=std::string(physical?"file:":"scope:")+identity.key()+"|"+lower(visual);
+    const auto key=std::string(physical?"file:":"scope:")+identity.key()+"|"+lower(visual)+"|"+Json::array({view.primary,view.secondary,view.clip,view.seconds,view.shape}).dump();
     static std::mutex lock;static std::map<std::string,std::weak_ptr<const Asset>> cache;
     std::lock_guard<std::mutex> guard(lock);if(auto found=cache[key].lock())return found;
     ResourceBlob blob;require(store.read(location,blob,failure),"resource read: "+failure.message);
-    auto result=decode(blob,lower(visual));cache[key]=result;
+    auto result=decode(blob,lower(visual),native?&effective:nullptr);cache[key]=result;
     if(cache.size()>1024)for(auto i=cache.begin();i!=cache.end();)i=i->second.expired()?cache.erase(i):std::next(i);
     return result;
 }
-std::shared_ptr<const Asset> select(const std::string& visual) {
+std::shared_ptr<const Asset> select(const std::string& visual,const ModelView& view) {
     static std::mutex lock;static ResourceStore store;static std::uint64_t generation=0;
     static std::map<std::string,std::weak_ptr<const Asset>> cache;static std::set<std::string> absent;
     std::lock_guard<std::mutex> guard(lock);ResourceStoreConfig mounts;std::uint64_t current=0;ResourceFailure failure;
     if(!owned_resource_runtime_mounts(mounts,&current))return {};
     if(current!=generation){store.close();require(store.open(mounts,failure),"mounts");generation=current;cache.clear();absent.clear();}
-    const auto key=lower(visual);if(absent.count(key))return {};if(auto found=cache[key].lock())return found;
-    auto result=select(store,key);if(result)cache[key]=result;else absent.insert(key);return result;
+    const auto key=lower(visual)+"|"+Json::array({view.primary,view.secondary,view.clip,view.seconds,view.shape}).dump();if(absent.count(key))return {};if(auto found=cache[key].lock())return found;
+    auto result=select(store,visual,view);if(result)cache[key]=result;else absent.insert(key);return result;
 }
 #endif
 FigureBounds collision(const Part& p,const std::array<float,3>& shape) {

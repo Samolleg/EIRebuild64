@@ -163,17 +163,20 @@ class CPersonage;
 class CParty;
 /////////////////////////////////////////////////////////////////////////////////////
 // all inventory screens ( camp, constructors ) are derived from this screen
+struct CampItemModelCache;
 class CI3DItemScreen : public CI3DScreen
 {
     friend struct E4CampAccess;
 protected:
     CI3DObjectItemInfo *pItemInfo;
     CItem *pMouseItem;
+    std::shared_ptr<CampItemModelCache> campItemModels;
     CI3DObjectCampBG *pCampBG;
 
     CLRUStorage<CI3DFigure, CI3DFigureLRUAllocator> figuresLRU;
     CLRUStorage<CTexture, CTextureLRUAllocator> texturesLRU;
 
+    void PreloadCampParty(const CParty& party);
     CItem *MoveItem(CItem *pItem, CParty *pDst, CParty *pSrc, int nDstLimit = 0, bool bStack = true,
                     bool bIncludePrice = false);
     CItem *MoveAllItems(CParty *pDst, CParty *pSrc);
@@ -185,7 +188,9 @@ public:
     {
     }
 
-    void DrawItem(CRenderer *pRend, SDrawItem &item);
+    void BeginCampPreviews(int shop);
+    void FinishCampPreviews();
+    void DrawItem(CRenderer *pRend, SDrawItem &item, std::vector<std::string>* visibleLegacyIcons=nullptr);
     void DrawUnit(CRenderer *pRend, CUnit *pDrawUnit, float fAngle = 0, float fX = 400,
                   bool bArmors = false);
     void DrawHead(CRenderer *pRend, SDrawHead &head);

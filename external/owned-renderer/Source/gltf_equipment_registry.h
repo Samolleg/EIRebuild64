@@ -151,6 +151,45 @@ inline std::vector<ItemBinding> item_bindings(const nlohmann::json& registry,
     return result;
 }
 
+// The inventory has no character, alternate hand, projectile or outfit layers.
+inline std::vector<ItemBinding> inventory_item_bindings(const nlohmann::json& registry,
+                                                        VisualEquipmentItem item) {
+    if (!registry.contains("items")) return {};
+    const auto& items=registry.at("items");
+    const auto shape=items.find(item.shape);
+    if (shape==items.end()) return {};
+    const auto& materials=shape->at("materials");
+    // A blueprint names a shape, without an instance material. Prefer a
+    // declared common geometry where available, otherwise the first drawable variant.
+    if(item.material.empty()) {
+        std::vector<ItemBinding> first;
+        for(const auto& variant:materials.items()) {
+            if(variant.key().empty()) continue;
+            item.material=variant.key();
+            auto parts=inventory_item_bindings(registry,item);
+            if(parts.empty()) continue;
+            const auto slot=variant.value().find(item.slot);
+            if(slot!=variant.value().end() && slot->is_object()) return parts;
+            if(first.empty()) first=std::move(parts);
+        }
+        return first;
+    }
+    const auto variant=materials.find(item.material);
+    if (variant==materials.end()) return {};
+    if (item.kind==VisualEquipmentItem::Kind::weapon && !variant->contains(item.slot))
+        item.slot="hand_l";
+    if (!variant->contains(item.slot)) return {};
+    auto parts=item_bindings(registry,item);
+    // A socket-mounted helmet may additionally replace the character's skinned hair.
+    const bool mountedHelmet=item.slot=="armor_0" && std::any_of(parts.begin(),parts.end(),
+        [](const ItemBinding& part){return part.socket=="socket_head";});
+    parts.erase(std::remove_if(parts.begin(),parts.end(),[&](const ItemBinding& part){
+        return part.arrow || (mountedHelmet && part.skinned) ||
+               (item.kind==VisualEquipmentItem::Kind::weapon && part.socket=="socket_back" && parts.size()>1);
+    }),parts.end());
+    return parts;
+}
+
 inline std::vector<ItemBinding> outfit_bindings(const nlohmann::json& registry,
     const std::vector<VisualEquipmentItem>& equipment,const std::string& body_resource)
 {

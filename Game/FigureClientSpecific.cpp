@@ -370,11 +370,8 @@ void CFigureClientSpecific::PrepareOwnedPicking(CRenderer *pRend, CRect *pRect)
             const auto p=matrix.Rotate4Vector(CPlot3D((i&1)?high.x:low.x,(i&2)?high.y:low.y,(i&4)?high.z:low.z));
             vertices[i]={p.x,p.y,p.w};
         }
-        static constexpr unsigned faces[12][3]={{0,1,3},{0,3,2},{4,6,7},{4,7,5},{0,4,5},{0,5,1},{2,3,7},{2,7,6},{0,2,6},{0,6,4},{1,5,7},{1,7,3}};
         FigureScreenBounds::Bounds bounds;
-        for(const auto& face:faces) {
-            const FigureScreenBounds::Point triangle[]={vertices[face[0]],vertices[face[1]],vertices[face[2]]};bounds.AddTriangle(triangle);
-        }
+        bounds.AddBox(vertices);
         rcPickBounds.SetRectEmpty();rcClip.SetRectEmpty();
         if(bounds.valid)rcPickBounds.SetRect(bounds.Left(),bounds.Top(),bounds.Right(),bounds.Bottom());
     }

@@ -31,6 +31,14 @@ struct Bounds {
                   top = (std::min)(top,y); bottom = (std::max)(bottom,y);}
         }
     }
+    void AddBox(const Point (&vertices)[8]) {
+        static constexpr unsigned faces[][3]={{0,1,3},{0,3,2},{4,6,7},{4,7,5},{0,4,5},{0,5,1},
+            {2,3,7},{2,7,6},{0,2,6},{0,6,4},{1,5,7},{1,7,3}};
+        for (const auto& face:faces) {
+            const Point triangle[]={vertices[face[0]],vertices[face[1]],vertices[face[2]]};
+            AddTriangle(triangle);
+        }
+    }
     int Left() const { return int(std::floor(left)); }
     int Top() const { return int(std::floor(top)); }
     int Right() const { return int(std::floor(right)) + 1; }
