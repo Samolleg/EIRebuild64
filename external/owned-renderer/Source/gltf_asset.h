@@ -46,6 +46,9 @@ struct Asset
     std::array<std::array<float,3>,2> sole_points{};
     std::vector<skn::Vertex> rest_vertices;
     std::vector<bool> portrait_head_submeshes;
+    // Neutral bounds in the game's Z-up model space, measured from drawn triangles.
+    std::array<float,3> portrait_min{},portrait_max{},face_min{},face_max{};
+    unsigned face_indices=0;
     std::vector<std::uint32_t> vertex_morphs;
     std::string cache_key, resource_key;
     float radius = 0;

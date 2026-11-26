@@ -27,6 +27,7 @@
 #include "scene_sinks.h"
 #include "fur.h"
 #include "skn_runtime.h"
+#include "gltf_asset.h"
 #include <exception>
 
 namespace {

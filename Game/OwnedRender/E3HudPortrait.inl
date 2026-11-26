@@ -149,7 +149,11 @@ bool livePortrait(CI3DFigure* figure,CRenderer* game,unsigned slot,int unitId,co
         else {sample.assembly=cache.bare;parts=select_parts(*sample.assembly);}
     }
         std::array<float,3> lo{}, hi{}, face_lo{}, face_hi{};
-        {
+        if (registryModel && registryModel->gltf_asset && registryModel->gltf_asset->face_indices) {
+            const auto& body=*registryModel->gltf_asset;
+            lo=body.portrait_min;hi=body.portrait_max;
+            face_lo=body.face_min;face_hi=body.face_max;
+        } else {
             // The fit boxes: the drawn head and hair, or for a shown helmet the
             // bare head and hair, so the face keeps the bare head's eye line
             // and scale and the frame clip trims the helmet.
