@@ -61,8 +61,7 @@ bool livePortrait(CI3DFigure* figure,CRenderer* game,unsigned slot,int unitId,co
         std::shared_ptr<OwnedPortraitOverlay> overlay;
         std::string lastResult;
         std::uint64_t previewSerial=0;
-        std::shared_ptr<const VisualAssemblyAsset> fitSource,poseSource;
-        std::array<float,16> poseMatrix{};
+        std::shared_ptr<const VisualAssemblyAsset> fitSource;
         std::array<float,3> fitLo{},fitHi{},faceLo{},faceHi{};
     };
     static std::array<Cache,32> caches;
@@ -114,6 +113,12 @@ bool livePortrait(CI3DFigure* figure,CRenderer* game,unsigned slot,int unitId,co
             return selected;
         };
 
+    // The embedded scene publishes native units as completed objects. Its
+    // preview source has no object pose. Set the actor's shape before both
+    // measuring the head and submitting it to the renderer.
+    sample.values.unit=true;
+    sample.object_pose.shape=sample.assembly->shape;
+    sample.selection={};sample.selection.neutral=true;
     auto parts=select_parts(*sample.assembly);
     if(parts.empty()) return result("head_parts");
     bool helmeted=std::any_of(parts.begin(),parts.end(),[&](auto i){
@@ -245,33 +250,6 @@ bool livePortrait(CI3DFigure* figure,CRenderer* game,unsigned slot,int unitId,co
             command.parts.push_back(std::move(part));
         }
 
-    if (!registryModel && (cache.poseSource!=sample.assembly || cache.poseMatrix!=command.base_world)) {
-        // Submit exactly the neutral node frames used to fit the portrait. A newly
-        // deployed unit can still have a world animation pending on the GPU.
-        std::vector<VisualNodeSample> nodes;
-        if (!sample_visual_skeleton(*sample.assembly->skeleton,sample.selection,
-            retained_visual_shape(sample),sample.assembly->center_shift,0,nodes,false)) return result("portrait_pose");
-        VisualPoseState root;
-        root.tilted_facing=root.root_rotation_valid=true;
-        root.root_rotation={1,0,0,0};
-        auto rows=std::make_shared<std::vector<NativeWorldGeometry::Pose::Override>>();
-        for (const auto index:parts) {
-            const auto node=sample.assembly->parts[index].skeleton_node;
-            if (node>=nodes.size()) return result("portrait_node");
-            if (std::any_of(rows->begin(),rows->end(),[&](const auto& entry){return entry.node==node;})) continue;
-            std::array<float,16> local;
-            if (!visual_node_world_matrix(root,nodes[node],{1,1,1},local)) return result("portrait_matrix");
-            const auto placed=retained_multiply_matrix(command.base_world,local);
-            NativeWorldGeometry::Pose::Override entry;
-            entry.node=node;entry.value.rotation=nodes[node].rotation;
-            std::copy_n(nodes[node].translation.begin(),3,entry.value.translation.begin());
-            for (unsigned row=0;row<3;++row) std::copy_n(placed.begin()+4*row,4,entry.value.rows[row].begin());
-            rows->push_back(entry);
-        }
-        std::sort(rows->begin(),rows->end(),[](const auto& a,const auto& b){return a.node<b.node;});
-        sample.prepared->gpu_pose.overrides=std::move(rows);
-        cache.poseSource=sample.assembly;cache.poseMatrix=command.base_world;
-    }
     command.sample=std::move(sample);
     if(neutral && selected && std::strcmp(neutral,selected)!=0) {
         const char* why="expression";
