@@ -176,23 +176,16 @@ bool livePortrait(CI3DFigure* figure,CRenderer* game,unsigned slot,int unitId,co
         // R: (x, y, z) -> (x, z, -y) stands the head up, face toward the viewer.
         const float head_height = hi[2] - lo[2], face_height = box.maximum[1] - box.minimum[1];
         if (!(head_height > 0) || !(face_height > 0)) { return result("fit_extent"); }
-        // Calibrated on the baked face of the same slot (save1159,
-        // portrait_head 0 vs 1, fur_mode 0, D3D11, 300 px portrait crop at
-        // 4K): baked eye line 137, chin 213, hair top 45; the unscaled fit
-        // (95f4a2ee) had eye-to-chin 78 (baked 76) but the eye line at 80 and
-        // the hair over the frame; 670bbe04 (0.71, 0.24) measured linear
-        // (eye-to-chin 55). 0.97 of the head+hair fit and the head part's
-        // centre 0.22 of the face figure's height below its box centre put
-        // eye line and chin on the baked ones and the hair top at ~40.
-        constexpr float kPortraitScale = .97f, kPortraitDrop = .22f;
-        const float scale = kPortraitScale * face_height / head_height;
+        // The reference FIG fit is calibrated to the original portrait. The GLB
+        // head has different proportions; leave room above the slot's status bars.
+        const float scale = (registryModel ? .8f : .97f) * face_height / head_height;
         // The face (the head part without hair) placed where the baked face sits.
         const std::array<float,3> head_centre{.5f*(face_lo[0]+face_hi[0]), .5f*(face_lo[1]+face_hi[1]), .5f*(face_lo[2]+face_hi[2])};
         std::array<float,16> base_world{{scale,0,0,0, 0,0,scale,0, 0,-scale,0,0, 0,0,0,1}};
         const std::array<float,3> rotated_centre{head_centre[0], head_centre[2], -head_centre[1]};
         for (unsigned axis = 0; axis < 3; ++axis)
             base_world[axis*4+3] = .5f*(box.minimum[axis]+box.maximum[axis]) - scale*rotated_centre[axis];
-        base_world[1*4+3] -= kPortraitDrop * face_height;
+        base_world[1*4+3] -= (registryModel ? .06f : .22f) * face_height;
 
     OwnedPreviewCommand command;
     command.portrait=true;
@@ -240,6 +233,7 @@ bool livePortrait(CI3DFigure* figure,CRenderer* game,unsigned slot,int unitId,co
             cache.overlay=owned_portrait_overlay(neutral,expression,portraitPictures,why);
             if(!cache.overlay)return result(why);
             cache.expression=selected;
+            GameJournal::Event("RENDER","hud_portrait_expression","slot=%u id=%d expression=%d",slot,unitId,expression);
         }
         // Native character GLBs have their own facial UVs. Project only the
         // changed texels through the game's expression figure for those heads.
