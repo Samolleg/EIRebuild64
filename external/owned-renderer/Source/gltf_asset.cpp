@@ -100,7 +100,8 @@ static std::shared_ptr<const Asset> select_resource(const std::string &visual, b
         });
     };
     require(itemBinding || validId(key), "character id " + key);
-    require(binding.at("profile") == "human.v1", "registry profile");
+    const std::string profileId = binding.at("profile").get<std::string>();
+    require(profileId == "human.v1" || (!itemBinding && !heroAlias && (profileId == "horse.v1" || profileId == "white-horse.v1")), "registry profile");
     const auto resource = binding.at("resource").get<std::string>();
     require(resource.rfind(itemBinding ? "models/items/" : "models/characters/", 0) == 0 && resource.size() > 4 &&
                 resource.substr(resource.size() - 4) == ".glb" &&
@@ -117,7 +118,7 @@ static std::shared_ptr<const Asset> select_resource(const std::string &visual, b
             return asset;
     try
     {
-        const auto blob = read(store, resource), profile = read(store, "profiles/human.v1.json");
+        const auto blob = read(store, resource), profile = read(store, "profiles/" + profileId + ".json");
         auto asset = decode(blob, profile, [&](const std::string &name, const void *data, std::uint32_t size) {
             ResourceBlob pixels;
             ResourceFailure failure;

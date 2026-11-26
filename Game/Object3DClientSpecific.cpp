@@ -741,6 +741,22 @@ std::shared_ptr<const owned::VisualAssemblyAsset> CObject3DClientSpecific::Build
     if (auto* unit = dynamic_cast<CUnit*>(object)) {
         auto* client = IWorldClient.GetPlayer();
         auto* player = client ? client->GetPlayer() : nullptr;
+        if (unit->GetMaskName() && _stricmp(unit->GetMaskName(),"unanhoho")==0) {
+            const auto& skin = GetPrimaryTextureName();
+            if (skin.CompareNoCase("horse00")==0) assembly->gltf_visual="mount-horse";
+            if (skin.CompareNoCase("horse01")==0) assembly->gltf_visual="mount-white-horse";
+            if (skin.CompareNoCase("zebra00")==0) assembly->gltf_visual="mount-zebra";
+            if (!assembly->gltf_visual.empty()) {
+                const auto& saddle = GetSecondaryTextureName();
+                for (const char* region : {"gipat", "ingos", "suslanger"}) {
+                    const std::string slot = std::string("saddle-") + region;
+                    if (saddle.CompareNoCase(slot.c_str()) == 0) {
+                        assembly->gltf_visual += std::string("-") + region;
+                        break;
+                    }
+                }
+            }
+        }
         assembly->main_hero_visual = ownedPreviewVisualRole.Resolve(player && player->IsMainHero(unit));
     }
 #endif
@@ -1519,6 +1535,16 @@ BOOL CObject3DClientSpecific::LoadTextures(LPCSTR pszPrimaryTextureName,
                 }
             }
         }
+    }
+    // Regional horse skins are embedded in the registered skinned GLB.
+    auto* horseObject = static_cast<CObject3D*>(lpObject);
+    if (horseObject->GetMaskName() && _stricmp(horseObject->GetMaskName(),"unanhoho")==0 &&
+        (szPrimaryTextureName.CompareNoCase("horse00")==0 || szPrimaryTextureName.CompareNoCase("horse01")==0 || szPrimaryTextureName.CompareNoCase("zebra00")==0) &&
+        pszSecondaryTextureName && (_stricmp(pszSecondaryTextureName,"saddle-gipat")==0 ||
+        _stricmp(pszSecondaryTextureName,"saddle-ingos")==0 || _stricmp(pszSecondaryTextureName,"saddle-suslanger")==0)) {
+        szSecondaryTextureName=pszSecondaryTextureName;
+        InvalidateOwnedAppearance();
+        return TRUE;
     }
     // load secondary texture
     if (pszSecondaryTextureName && *pszSecondaryTextureName &&

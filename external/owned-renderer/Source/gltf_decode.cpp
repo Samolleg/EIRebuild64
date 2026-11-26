@@ -327,7 +327,8 @@ std::shared_ptr<Asset> decode(const ResourceBlob &blob, const ResourceBlob &prof
     const bool articulated = metadata.at("kind") == "articulated-item";
     const bool rigid = articulated || metadata.at("kind") == "rigid-item";
     const bool wearable = metadata.at("kind") == "skinned-item";
-    require(metadata.at("profile") == "human.v1" &&
+    const bool horse = (metadata.at("profile") == "horse.v1" || metadata.at("profile") == "white-horse.v1") && metadata.at("kind") == "body";
+    require((horse || metadata.at("profile") == "human.v1") &&
         (rigid || wearable || metadata.at("kind") == "body"), "asset profile/kind");
     output->rigid = rigid; output->wearable = wearable;
     const bool physique = metadata.contains("physique");
@@ -382,7 +383,7 @@ std::shared_ptr<Asset> decode(const ResourceBlob &blob, const ResourceBlob &prof
             if (node->skin) activeSkins.insert(node->skin);
         }
     const auto contract = json(profile);
-    require(contract.at("id") == "human.v1" && contract.at("version") == 1, "profile version");
+    require(contract.at("id") == metadata.at("profile") && contract.at("version") == 1, "profile version");
     const double maxIdleEdgeStretch = contract.at("gltf").at("maxIdleEdgeStretch").get<double>();
     require(std::isfinite(maxIdleEdgeStretch) && maxIdleEdgeStretch >= 1,
             "profile idle edge stretch limit");
