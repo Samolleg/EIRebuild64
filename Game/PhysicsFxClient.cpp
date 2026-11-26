@@ -93,7 +93,7 @@ struct Client::Impl {
     unsigned remaining=0;
     std::uint64_t generation=0,revision=0;
 };
-Client::Client():impl(std::make_unique<Impl>()){InstallCharacterPhysics();}
+Client::Client():impl(std::make_unique<Impl>()){}
 Client::~Client()=default;
 void Client::Reset(int tick){impl=std::make_unique<Impl>();impl->events.Reset(tick);}
 void Client::Fireblast(CWorldClient& host,int id,int start,const CPlot3D& point,float power,float radius){

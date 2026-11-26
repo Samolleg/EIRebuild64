@@ -22,7 +22,6 @@ struct Stats {
 };
 // The same six vertices describe each convex physics shape and render mesh.
 std::array<Vec,6> StoneVertices(unsigned shape,float radius);
-void InstallCharacterPhysics();
 struct StoneTrack {
     std::array<Pose,2> poses;
     float radius, age, life;

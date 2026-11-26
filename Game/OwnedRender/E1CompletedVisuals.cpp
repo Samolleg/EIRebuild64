@@ -148,9 +148,6 @@ bool completeVisualFrame(owned::RetainedVisualFrame& frame, bool combat) noexcep
                 }
             }
         }
-        sample.secondary_physics=true;
-        sample.secondary_frozen=theWorld.IsCombatPause();
-        sample.secondary_clock=theWorld.GetRenderTimeSegments()*PhysicsFx::TickSeconds;
         sample.values.unit=true;
         sample.values.dead=unit->IsDead()!=FALSE;
         sample.values.invisible=unit->IsInvisible()!=FALSE;

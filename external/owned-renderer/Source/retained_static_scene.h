@@ -23,7 +23,7 @@
 namespace owned {
 namespace skn {struct RuntimeAsset; struct Dds;}
 namespace skm {struct Clip;}
-namespace gltf {struct PlaybackState; struct BreastState; struct PhysiqueSurface;}
+namespace gltf {struct PlaybackState; struct PhysiqueSurface;}
 
 struct RetainedStaticSourceCandidate;
 struct FurProfile;
@@ -451,7 +451,6 @@ struct VisualPreparedResources {
     NativeWorldGeometry::Pose gpu_pose;
     std::shared_ptr<gltf::PlaybackState> gltf_playback;
     std::string attachment_action, previous_attachment_action;
-    std::shared_ptr<gltf::BreastState> breast_physics;
     std::shared_ptr<const skm::Clip> motion_clip;
     std::shared_ptr<const skn::RuntimeAsset> motion_asset;
     std::shared_ptr<const VisualAssemblyAsset> motion_assembly;
@@ -496,15 +495,6 @@ struct RetainedVisualSample {
     bool riding_calm = false;
     int rideTransition = 0; // Signed flank, magnitude 1 to mount or 2 to dismount.
     float rideProgress = 0.f;
-    // UI adapters supply a rigid simulation frame in metres and a separate drawing
-    // transform. Both are borrowed only during the synchronous private preview draw.
-    struct PreviewPhysicsSpace {
-        std::array<float,16> simulation, to_display;
-        const char* view;
-    };
-    const PreviewPhysicsSpace* preview_physics = nullptr;
-    bool secondary_physics = false, secondary_frozen = false;
-    double secondary_clock = 0;
     VisualResourceIncarnation resource{};
     LifecycleIdentity lifecycle{};
     RetainedVisualStatus status = RetainedVisualStatus::awaiting_values;

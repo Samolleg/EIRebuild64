@@ -15,7 +15,6 @@
 #include "gltf_weapon_grip.h"
 #include "environment_material.h"
 #include "environment_asset.h"
-#include "gltf_breast.h"
 #include "world_scene_algorithms.h"
 
 #include <algorithm>
@@ -1179,7 +1178,7 @@ void prepare_physique(const RetainedVisualSample& sample,const gltf::Asset& body
  }
  p.motion_physique=std::move(pose);p.physique_surface=std::move(surface);
  p.motion_physique_input=sample.physique;p.physique_source=body.gpu_animation;
- p.sole_valid=false;p.breast_physics.reset();
+ p.sole_valid=false;
 }
 const gltf::EquipmentSelection& prepare_gltf_equipment(const RetainedVisualSample& sample,
     const gltf::Asset& body) {
@@ -1270,7 +1269,6 @@ const gltf::EquipmentSelection& prepare_gltf_equipment(const RetainedVisualSampl
  }
  if(support)selected->support_arm=same && prepared.gltf_equipment->support_arm ?
      prepared.gltf_equipment->support_arm:gltf::weapon_arm_plan(body,*support);
- selected->radius+=2*gltf::secondary_limit; // rotated outer skin can travel farther than its driver
  // A translated root keeps the original sole midpoint. Its shift is bounded
  // by both feet's old and shaped envelopes, including their local sole points.
  if(prepared.motion_physique){

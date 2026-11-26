@@ -153,19 +153,6 @@ bool prepare_gltf_pose(const RetainedVisualSample &sample,
         current.root_to_world=current.placed_with_sole(current.root_to_world);
     }
     current.overrides.reset();
-    if (sample.assembly->main_hero_visual && sample.secondary_physics) {
-        auto& secondary=prepared.breast_physics;
-        if(!secondary || secondary->asset!=asset->gltf_asset) {
-            secondary=std::make_shared<gltf::BreastState>();
-            if(!secondary->bind(asset->gltf_asset))secondary.reset();
-        }
-        if(secondary) {
-            const auto* ui=sample.preview_physics;
-            secondary->update(sample.secondary_clock,playback,ui?current.placed_with_sole(ui->simulation):current.root_to_world,
-                seek,unsigned(base),sample.secondary_frozen,ui,prepared.motion_physique.get(),(request.flags&0x3c0000u)==0x180000u);
-            current.overrides=secondary->overrides;
-        }
-    }
     current.height_scale = 1;
     const auto& outfit=prepare_gltf_equipment(sample,*asset->gltf_asset);
     current.attachment_nodes=outfit.mechanism_nodes;
@@ -173,9 +160,7 @@ bool prepare_gltf_pose(const RetainedVisualSample &sample,
         const auto& body=*asset->gltf_asset;
         using Overrides=std::vector<NativeWorldGeometry::Pose::Override>;
         auto rows=std::make_shared<Overrides>();
-        if(current.overrides)*rows=*current.overrides;
-        const auto previous_override_count=rows->size();
-        rows->reserve(rows->size()+outfit.mechanism_nodes+(outfit.support_arm?outfit.support_arm->nodes.size():0));
+        rows->reserve(outfit.mechanism_nodes+(outfit.support_arm?outfit.support_arm->nodes.size():0));
         const auto start=unsigned(base+body.geometry.joints.size())+body.gpu_animation->morphs;
         const gltf::Affine basis{1,0,0,0,0,0,-1,0,0,1,0,0,0,0,0,1};
         const auto root=gltf::multiply(current.root_to_world,basis);
@@ -302,7 +287,7 @@ bool prepare_gltf_pose(const RetainedVisualSample &sample,
                 }
             }
         }
-        if(rows->size()!=previous_override_count) {
+        if(!rows->empty()) {
             std::stable_sort(rows->begin(),rows->end(),[](const auto& a,const auto& b){return a.node<b.node;});
             current.overrides=std::move(rows);
         }

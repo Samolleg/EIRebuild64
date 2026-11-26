@@ -95,39 +95,8 @@ BOOL CObject3DClientSpecific::DrawModelPreview(CRenderer* renderer) try
     lpObject->GetOrientation().GetComponents(placement.quaternion[0], placement.quaternion[1],
         placement.quaternion[2], placement.quaternion[3]);
     GetScaleCoeffs(placement.scale[0], placement.scale[1], placement.scale[2]);
-    owned::ModelPlacementFacts physicalPlacement;
-    if (clock.clock == owned::ModelPreviewClock::inventory && presentation) {
-        const float halfAngle=presentation->physics_yaw*.5f;
-        physicalPlacement.quaternion={std::cos(halfAngle),0,0,std::sin(halfAngle)};
-    } else {
-        physicalPlacement.position=placement.position;
-        physicalPlacement.quaternion=placement.quaternion;
-    }
     if (presentation && presentation->placed) placement = presentation->placement;
     if (!owned::prepare_model_placement(placement, objectToWorld)) return reject("preview.placement");
-    owned::RetainedVisualSample::PreviewPhysicsSpace physicsSpace{};
-    if (registrySelected && sample.assembly->main_hero_visual && presentation &&
-        clock.clock != owned::ModelPreviewClock::display) {
-        if (!owned::prepare_model_placement(physicalPlacement,physicsSpace.simulation))
-            return reject("preview.physics_placement");
-        const bool inventory=clock.clock==owned::ModelPreviewClock::inventory;
-        physicsSpace.view=inventory?"inventory":"info";
-        // Move final world-space joint matrices back into model space, then into
-        // the UI. Its camera zoom/slide and centring are not physical motion.
-        auto inverse=physicsSpace.simulation;
-        for(unsigned row=0;row<3;++row) {
-            inverse[row*4+3]=0;
-            for(unsigned col=0;col<3;++col) {
-                inverse[row*4+col]=physicsSpace.simulation[col*4+row];
-                inverse[row*4+3]-=inverse[row*4+col]*physicsSpace.simulation[col*4+3];
-            }
-        }
-        physicsSpace.to_display=owned::gltf::multiply(objectToWorld,inverse);
-        sample.secondary_physics=true;
-        sample.preview_physics=&physicsSpace;
-        sample.secondary_frozen=!inventory && theWorld.IsCombatPause();
-        sample.secondary_clock=inventory?clock.now*(1.024/15.):theWorld.GetRenderTimeSegments()*PhysicsFx::TickSeconds;
-    }
     sample.object_pose.position = placement.position;
     sample.object_pose.quaternion = placement.quaternion;
     struct Part { CFigure* figure; CMaterial* material; unsigned set; std::size_t ordinal; };
