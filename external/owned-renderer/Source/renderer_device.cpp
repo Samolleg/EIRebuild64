@@ -495,15 +495,7 @@ void migrate_settings(RendererConfig& config,const wchar_t* save_path) noexcept 
  if(terrain_quality>=0)config.set_integer("terrain_quality",terrain_quality); // the old Low preset keeps Medium
  if(saved==5&&preset!=GraphicsPreset::custom&&fur_saved>=0&&fur_saved!=2)config.set_integer("fur_mode",fur_saved);
  std::string reset;
- // Version 11: on a named preset the old defaults of the host and the
- // backend were never a choice in the graphics menu's presets: they take the
- // new defaults. Custom keeps them (it may be a deliberate Direct3D 11).
- if(saved<11&&preset!=GraphicsPreset::custom){
-  const RendererOption* host=config.find("x64_render_host");
-  if(host&&host->type==RendererOptionType::boolean&&!host->boolean_value&&config.reset_to_default("x64_render_host"))reset+=reset.empty()?"x64_render_host":" x64_render_host";
-  const RendererOption* backend=config.find("renderer_backend");
-  if(backend&&backend->type==RendererOptionType::integer&&backend->integer_value==0&&config.reset_to_default("renderer_backend"))reset+=reset.empty()?"renderer_backend":" renderer_backend";
- }
+
  for(const auto& change:kChangedDefaults){
   if(change.version<=saved)continue;
   // A row of the re-applied preset holds the preset's value (Low: fur_mode

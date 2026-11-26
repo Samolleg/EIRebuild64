@@ -5,8 +5,6 @@
 #endif
 #include "dxil_table.h"
 
-#include <d3d11shader.h>
-
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
@@ -225,8 +223,7 @@ int main(int argc, char** argv) {
     append_shader_groups(0xFFFFFFFFu, programs);
 #ifdef EID3D11_EMBEDDED
     // The embedded renderer's native specialisations may differ from the
-    // standalone DDraw cache (for example, the host triangle transform). Keep
-    // their exact bytecode in the EXE resource table so it needs no sidecar.
+    // standalone renderer. Export the matching keys together with the other DXIL variants.
     std::vector<NativeSpecialisedPrograms> embeddedSpecialisations;
     const auto keys = native_shipped_specialisation_keys();
     embeddedSpecialisations.reserve(keys.size());

@@ -296,12 +296,7 @@ std::string system_summary() {
             }
         }
     }
-    const std::wstring ini = renderer_config_path();
-    wchar_t value[64]{};
-    GetPrivateProfileStringW(L"graphics", L"x64_render_host", L"(default)", value, 64, ini.c_str());
-    out += "x64_render_host: " + narrow(value) + "\n";
-    GetPrivateProfileStringW(L"graphics", L"renderer_backend", L"(default)", value, 64, ini.c_str());
-    out += "renderer_backend: " + narrow(value) + "\n";
+    out += "renderer_backend: Direct3D 12 embedded\n";
     {
         std::lock_guard<std::mutex> guard(g_status_lock);
         if (!g_status_line.empty()) out += "last memory status: " + g_status_line + "\n";

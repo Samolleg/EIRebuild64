@@ -50,7 +50,7 @@ constexpr PlayerGraphicsSetting kSettings[] = {
     {"upscaler", kCategories[0], "Upscaling",
      "Renders the world at a lower resolution and rebuilds a sharp, smooth image at the screen size. "
      "Replaces anti-aliasing and render scale while on. NVIDIA DLSS needs the 64-bit render host and an RTX card; "
-     "AMD FSR runs on most graphics cards from 2015 on (FSR 3.1 with Direct3D 12, FSR 2 with Direct3D 11). Off renders at the render scale.",
+     "AMD FSR 3.1 runs on supported Direct3D 12 graphics cards. Off renders at the render scale.",
      nullptr, false, {0, 0, 0, 0, 0}},
     {"upscaler_quality", kCategories[0], "Upscaling quality",
      "The internal resolution of the upscaler. Quality looks best, Ultra Performance is fastest; "

@@ -51,15 +51,15 @@ $generate={param($exe,$dir)
         Write-ShaderText (Join-Path $dir $name) ('stable '+$name)
     }
 }
-$null=Invoke-ShaderGeneration $embedder $compiler $directory $generate
+$null=Invoke-ShaderGeneration $embedder $directory $generate
 $binary=Join-Path $directory 'dxil/dxil.rc';$stamp=[IO.File]::GetLastWriteTimeUtc($binary)
-Check (!(Invoke-ShaderGeneration $embedder $compiler $directory $generate)) 'no-op generation executed'
+Check (!(Invoke-ShaderGeneration $embedder $directory $generate)) 'no-op generation executed'
 Write-ShaderText $embedder 'embedder-two'
-$null=Invoke-ShaderGeneration $embedder $compiler $directory $generate
+$null=Invoke-ShaderGeneration $embedder $directory $generate
 Check ($script:generatorCalls -eq 2 -and [IO.File]::GetLastWriteTimeUtc($binary) -eq $stamp) 'unchanged table was touched after producer change'
-Check (!(Invoke-ShaderGeneration $embedder $compiler $directory $generate)) 'unchanged old binary kept generation permanently dirty'
+Check (!(Invoke-ShaderGeneration $embedder $directory $generate)) 'unchanged old binary kept generation permanently dirty'
 [IO.File]::Delete((Join-Path $directory 'dxil/src/one.hlsl'))
-$null=Invoke-ShaderGeneration $embedder $compiler $directory $generate
+$null=Invoke-ShaderGeneration $embedder $directory $generate
 Check ($script:generatorCalls -eq 3) 'missing generated HLSL not repaired'
 if($Rc){
     $actual=Join-Path $root 'native.res'

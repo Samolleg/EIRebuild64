@@ -77,9 +77,9 @@ function Get-ShaderGeneratedFiles([string]$Directory) {
     if([IO.Directory]::Exists($sources)){$files+=@([IO.Directory]::EnumerateFiles($sources,'*.hlsl')|Sort-Object)}
     return $files
 }
-function Invoke-ShaderGeneration([string]$Embedder,[string]$Compiler,[string]$Directory,[scriptblock]$Run) {
+function Invoke-ShaderGeneration([string]$Embedder,[string]$Directory,[scriptblock]$Run) {
     $receipt=Join-Path $Directory 'generation.inputs.json'
-    $inputHash=Get-ShaderInputHash @($Embedder,$Compiler,$script:ShaderBuildHelperPath)
+    $inputHash=Get-ShaderInputHash @($Embedder,$script:ShaderBuildHelperPath)
     if(Test-ShaderReceipt $receipt $inputHash @(Get-ShaderGeneratedFiles $Directory)){
         Write-Host 'Shader producer unchanged; generation skipped.';return $false
     }

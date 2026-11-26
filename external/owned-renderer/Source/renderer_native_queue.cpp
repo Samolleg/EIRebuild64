@@ -1180,8 +1180,8 @@ HRESULT Renderer::get_native_mesh(const NativeGeometryView& view,NativeMesh*& ou
    mesh.bounds_min[axis]=mesh.bounds_max[axis]=0;
  };
  // A changed source with a LOD table needs a fresh contiguous layout:
- // reduced level sizes can change even when the full mesh counts do not.
- if(found!=native_meshes_.end()&&!(revision_changed&&key.static_lods)){
+ // Level sizes and skin streams can change even when the full mesh counts do not.
+ if(found!=native_meshes_.end()&&!(revision_changed&&(key.static_lods||source.skin_vertices))){
   auto& mesh=found->second;
   if(revision_changed){
    std::vector<NativeGpuComponent> components;std::vector<std::uint32_t> indices;
