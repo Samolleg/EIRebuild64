@@ -108,37 +108,13 @@ struct EventCursor {
         active=true;action=next;absolute=at;
     }
 };
-struct RidingIdleChoice { unsigned variant=0; float time=0; };
-struct RidingIdleState {
-    bool active=false, rider=false;
-    double started=0;
-    unsigned episodes=0, first=0;
-    RidingIdleChoice Update(bool eligible,double now,bool isRider) {
-        if(!eligible || !std::isfinite(now)) { active=false; return {}; }
-        if(!active || now<started || rider!=isRider) {
-            active=true; rider=isRider; started=now; first=episodes++;
-        }
-        // The horse's source clips contain very rapid neck and ear keys.
-        // Give the filtered motion time to finish and leave a quiet pause.
-        constexpr double horseRate=.30;
-        const double period=isRider?9.0:20.0, delay=isRider?2.0:3.0;
-        const double length=isRider?4.0:(10.0/3.0)/horseRate;
-        const double elapsed=(std::max)(0.0,now-started);
-        const auto cycle=static_cast<std::uint64_t>(std::floor(elapsed/period));
-        const double phase=elapsed-double(cycle)*period;
-        if(phase<delay || phase>=delay+length)return {};
-        return {1u+unsigned((first+cycle)%(isRider?3u:2u)),
-            float((phase-delay)*(isRider?1.0:horseRate))};
-    }
-};
 struct PlaybackState {
     bool active=false;
     ActionToken action;
     Playback value;
-    double last_clock=0,transition_start=0,transition_duration=.12;
+    double last_clock=0,transition_start=0;
     EventCursor events;
-    RidingIdleState riding_idle;
-    Playback Update(unsigned clip,float time,const ActionToken& next,double clock,bool seek,bool instant=false,float fadeSeconds=.12f){
+    Playback Update(unsigned clip,float time,const ActionToken& next,double clock,bool seek,bool instant=false){
         animation_require(std::isfinite(clock)&&std::isfinite(time),"playback clock");
         const bool reset=!active||seek||clock<last_clock;
         if(reset)value={clip,UINT32_MAX,time,0,1};
@@ -148,9 +124,8 @@ struct PlaybackState {
             // replays a previous action or needs an unbounded blend stack.
             const bool fade=!instant&&value.blend>=1;
             value={clip,fade?value.clip:UINT32_MAX,time,value.time,fade?0.f:1.f};transition_start=clock;
-            transition_duration=(std::max)(.01,double(fadeSeconds));
         }else value.time=time;
-        if(value.blend<1)value.blend=float((std::clamp)((clock-transition_start)/transition_duration,0.0,1.0));
+        if(value.blend<1)value.blend=float((std::clamp)((clock-transition_start)/.12,0.0,1.0));
         action=next;active=true;last_clock=clock;return value;
     }
 };

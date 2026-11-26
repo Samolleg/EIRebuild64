@@ -45,18 +45,7 @@ bool prepare_gltf_pose(const RetainedVisualSample &sample,
     gltf::Request request;
     unsigned clip = UINT32_MAX;
     const bool neutral = sample.selection.neutral;
-    if (sample.riding) {
-        const char* name="ride_seated";
-        switch(sample.rideTransition) {
-            case 1: name="ride_mount_left"; break;
-            case -1: name="ride_mount_right"; break;
-            case 2: name="ride_dismount_left"; break;
-            case -2: name="ride_dismount_right"; break;
-        }
-        clip = gltf::named_clip(animation,name);
-        gltf::animation_require(clip!=UINT32_MAX,"riding pose");
-        request.flags=0x80180000u; request.frames=1;
-    } else if (neutral) {
+    if (neutral) {
         clip = gltf::named_clip(animation, "idle");
         gltf::animation_require(clip != UINT32_MAX, "neutral pose requires idle");
         request.flags = 0x80180000u; request.frames = 1;
@@ -70,29 +59,7 @@ bool prepare_gltf_pose(const RetainedVisualSample &sample,
         clip = gltf::resolve_clip(animation, request);
         gltf::validate_event_phase(animation.clips[clip], request);
     }
-    if (sample.riding_reins_held) {
-        const auto held=gltf::named_clip(animation,"tack_held_"+animation.clips[clip].name);
-        if (held!=UINT32_MAX) clip=held;
-    }
     const double clock = sample.pose.time / 15.0;
-    const bool calmRider=sample.riding && !sample.rideTransition && sample.riding_calm && !sample.values.dead;
-    const bool calmHorse=!sample.riding && sample.riding_reins_held && sample.riding_calm &&
-        !sample.values.dead && (neutral || (request.flags&0x3c0000u)==0x180000u);
-    const auto idle=state.riding_idle.Update(calmRider||calmHorse,clock,calmRider);
-    float idleTime=-1;
-    if(calmHorse) {
-        // Do not let the host's ordinary, faster idle run between the two
-        // mounted-idle clips: hold the common seated anchor instead.
-        const auto rest=gltf::named_clip(animation,"tack_held_idle");
-        if(rest!=UINT32_MAX) {clip=rest;idleTime=0;}
-    }
-    if(idle.variant) {
-        static constexpr const char* riderClips[]{"ride_idle_look_left","ride_idle_look_right","ride_idle_settle"};
-        static constexpr const char* horseClips[]{"tack_held_riding_idle_perk_soft","tack_held_riding_idle_nod_soft"};
-        const auto name=calmRider?riderClips[idle.variant-1]:horseClips[idle.variant-1];
-        const auto selected=gltf::named_clip(animation,name);
-        if(selected!=UINT32_MAX) {clip=selected;idleTime=(std::min)(idle.time,animation.clips[clip].duration);}
-    }
     const double absolute = double(sample.pose.cycle) + sample.pose.phase / request.frames;
     const gltf::ActionToken token{sample.pose.intent_revision, sample.pose.selection,
         neutral ? UINT32_MAX : sample.selection.ordinal};
@@ -102,30 +69,8 @@ bool prepare_gltf_pose(const RetainedVisualSample &sample,
         prepared.previous_attachment_action=std::move(prepared.attachment_action);
         prepared.attachment_action=request.legacy;
     }
-    const float localTime=sample.rideTransition ? animation.clips[clip].duration*sample.rideProgress :
-        idleTime>=0 ? idleTime : gltf::clip_time(animation.clips[clip],request,sample.pose.phase);
-    bool landingBlend=false;
-    if (!sample.riding && state.active && state.value.clip<animation.clips.size()) {
-        const auto& name=animation.clips[state.value.clip].name;
-        if (name=="ride_dismount_left" || name=="ride_dismount_right") {
-            const auto grounded=gltf::named_clip(animation,
-                name=="ride_dismount_left"?"ride_grounded_left":"ride_grounded_right");
-            gltf::animation_require(grounded!=UINT32_MAX,"missing grounded riding pose");
-            // The actor now owns translation and yaw. Keep the same final
-            // joint pose in actor space for the ordinary locomotion crossfade.
-            state.value.clip=grounded; state.value.time=0; state.value.blend=1;
-            landingBlend=true;
-        }
-    }
-    const auto previousName=state.active && state.value.clip<animation.clips.size() ?
-        animation.clips[state.value.clip].name : std::string{};
-    const bool leavingTransfer=(previousName.rfind("ride_mount_",0)==0 ||
-        previousName.rfind("ride_dismount_",0)==0) && !landingBlend;
-    const bool riderIdleTransition=sample.riding && !sample.rideTransition &&
-        (previousName.rfind("ride_idle_",0)==0 || animation.clips[clip].name.rfind("ride_idle_",0)==0);
-    const auto playback = state.Update(clip, localTime,
-        token, clock, seek && !landingBlend, sample.rideTransition || leavingTransfer || (request.flags & 0x3c0000u) == 0x1c0000u,
-        riderIdleTransition?.30f:calmHorse?.45f:.12f);
+    const auto playback = state.Update(clip, gltf::clip_time(animation.clips[clip], request, sample.pose.phase),
+        token, clock, seek, (request.flags & 0x3c0000u) == 0x1c0000u);
     current.baked.reset();
     current.gltf_clip = playback.clip; current.gltf_previous = playback.previous;
     current.gltf_time = playback.time; current.gltf_previous_time = playback.previous_time; current.gltf_blend = playback.blend;

@@ -1685,28 +1685,6 @@ CUnit *CAIMap::CheckCircleCollision(CUnit *pUnit, const CPlot3D &newPos, const N
         const float sum=radius+navigation.CollisionRadius(other);
         const float next=distanceXY2(newPos,other->GetCP());
         if(next>=sum*sum)continue;
-        if(other->ridingPassenger==pUnit->GetID()) {
-            // A mounted horse is long and narrow. Only its own rider may use
-            // the verified flank strip inside the ordinary crowd radius.
-            const auto axis=other->GetXAxis();
-            const float norm=std::hypot(axis.x,axis.y);
-            const auto gap=newPos-other->GetCP();
-            if(norm>.01f) {
-                const float lateral=std::abs(gap.x*axis.x+gap.y*axis.y)/norm;
-                const float longitudinal=std::abs(gap.y*axis.x-gap.x*axis.y)/norm;
-                // A capsule-radius circle includes empty space around the
-                // shoulders and rump. Test the swept approach against the body.
-                const float side=lateral/.60f,along=longitudinal/1.38f;
-                const float distance=side*side+along*along;
-                if(distance>=1.f)continue;
-                if(allowEscape) {
-                    const auto prior=pUnit->GetCP()-other->GetCP();
-                    const float sx=(prior.x*axis.x+prior.y*axis.y)/(norm*.60f);
-                    const float sy=(prior.y*axis.x-prior.x*axis.y)/(norm*1.38f);
-                    if(distance>sx*sx+sy*sy+.00001f)continue;
-                }
-            }
-        }
         if(planning&&navigation.CanYield(pUnit,other))continue;
         const float previous=distanceXY2(pUnit->GetCP(),other->GetCP());
         if(allowEscape&&previous<sum*sum&&next>previous+.00001f)continue;

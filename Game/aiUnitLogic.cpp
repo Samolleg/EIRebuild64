@@ -2785,7 +2785,6 @@ static void ModDeathFearUpdate(CAIUnitLogic &logic){
 }
 void CAIUnitLogic::Segment()
 {
-    if (GetUnit()->ridingPassenger >= 0) return;
     int nBestPower, nPower;
     POSITION pos;
     CAIUnitMotivation *pBest;

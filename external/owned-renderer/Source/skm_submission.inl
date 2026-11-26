@@ -4,14 +4,14 @@ bool prepare_baked_motion(const RetainedVisualSample& sample){
  auto& prepared=*sample.prepared;auto& current=prepared.gpu_pose;
  try{
   bool gltf_present=false;
-  auto gltf=skn::select_gltf(sample.assembly->gltf_name(),sample.assembly->main_hero_visual,gltf_present);
+  auto gltf=skn::select_gltf(sample.assembly->skeleton->visual_reference,sample.assembly->main_hero_visual,gltf_present);
   if(gltf_present)return prepare_gltf_pose(sample,gltf);
   if(prepared.motion_assembly!=sample.assembly){
    prepared.motion_pose_valid=false;prepared.motion_clip.reset();current.baked.reset();
    prepared.motion_source_binding.reset();prepared.motion_binding.reset();
    prepared.motion_asset.reset();prepared.motion_nodes.clear();prepared.motion_mounts.clear();
    prepared.motion_context=prepared.motion_root=UINT_MAX;
-   bool present=false;auto asset=skn::select_visual(sample.assembly->gltf_name(),sample.assembly->main_hero_visual,present);
+   bool present=false;auto asset=skn::select_visual(sample.assembly->skeleton->visual_reference,sample.assembly->main_hero_visual,present);
    if(asset&&asset->motion){
     const auto& motion=*asset->motion;const auto& assembly=*sample.assembly;
     for(unsigned k=0;k<3;++k)if(std::abs(retained_visual_shape(sample)[k]-motion.shape[k])>1e-5)

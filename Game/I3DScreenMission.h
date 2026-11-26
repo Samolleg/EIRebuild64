@@ -23,8 +23,7 @@ enum ECursorInputModes
     MODE_ITEM_TARGET_OBJECT,
     MODE_QUEST_TARGET_OBJECT,
     MODE_SKILL_TARGET_UNIT,
-    MODE_SKILL_TARGET_OBJECT,
-    MODE_RIDE_TARGET
+    MODE_SKILL_TARGET_OBJECT
 };
 /////////////////////////////////////////////////////////////////////////////////////
 struct SI3DFaceState
@@ -87,15 +86,6 @@ private:
     int nCheckExit; // for exiting;
     bool bDoCheckExit;
 
-    int approachingHorse = -1, approachingRider = -1;
-    CPlot3D ridingApproachPoint;
-    Navigation::Location ridingFlankSupport;
-    bool ridingClearanceStep=false;
-    double ridingOrderTick=0;
-    void CancelRidingApproach();
-    void UpdateRidingApproach();
-    bool Dismount(CUnit *rider);
-    friend class CI3DObjectSkills;
     bool bHLButtonDown[6];
 
     CI3DObjectWeapons *pWeapons;
@@ -351,7 +341,6 @@ private:
     int iSelected;
     CUnit *pUnit;
     DWORD fieldCampButtonLastUpdate;
-    int lastRideTip = -1;
     int fieldCampButtonAvailability;
     CArray<int, int> nTypes;
 

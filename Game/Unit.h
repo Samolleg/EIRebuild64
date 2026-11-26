@@ -192,18 +192,6 @@ inline void CUnitSpecific::Destroy()
 class CUnit : public CMapObject
 {
 public:
-    int ridingPassenger = -1;
-    bool ridingRestored = false;
-    static constexpr float rideMountTicks=50.f, rideDismountTicks=43.f;
-    int rideFlank=1;
-    bool RidingTransition(double now) const {
-        const double elapsed=now-rideTransitionTick;
-        return elapsed>=0 && (ridingHorse>=0 ? elapsed<rideMountTicks :
-            dismountHorse>=0 && elapsed<rideDismountTicks);
-    }
-    int dismountHorse = -1;
-    double rideTransitionTick = -1000;
-    int ridingHorse = -1; // Authoritative local mission unit ID.
     Navigation::Location navLocation;
     // Derived from saved MovementModifier GS at command/route/load events.
     bool scriptMovementEnabled=false;
