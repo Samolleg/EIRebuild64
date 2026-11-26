@@ -121,8 +121,6 @@ struct MaterialComposition {
 struct VisualAssemblyAsset {
     std::shared_ptr<const environment::Asset> environment_source; // local cache lifetime; not part of wire format
     bool main_hero_visual=false;
-    std::string gltf_visual;
-    const std::string& gltf_name() const { return gltf_visual.empty() ? skeleton->visual_reference : gltf_visual; }
     std::uint64_t revision = 0;
     std::shared_ptr<const ModelCpuAsset> skeleton;
     std::vector<VisualPartAsset> parts;
@@ -494,11 +492,6 @@ struct RetainedVisualSample {
     // Embedded units use the host's completed pose/materials, not the retail
     // route/intent evaluator. Their rendering still follows unit policy.
     bool completed_pose = false;
-    bool riding = false;
-    bool riding_reins_held = false;
-    bool riding_calm = false; // Mounted pair is stopped and not in a transfer.
-    int rideTransition=0; // +1/-1 mount left/right, +2/-2 dismount left/right.
-    float rideProgress=0.f;
     // UI adapters supply a rigid simulation frame in metres and a separate drawing
     // transform. Both are borrowed only during the synchronous private preview draw.
     struct PreviewPhysicsSpace {

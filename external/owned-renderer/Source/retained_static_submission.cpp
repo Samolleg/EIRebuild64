@@ -1295,7 +1295,7 @@ bool skn_pose_bounds(const RetainedVisualSample& sample,NativeWorldBounds& bound
  }
  std::shared_ptr<const skn::RuntimeAsset> asset;
  if(prepared.skn_bounds_asset&&prepared.skn_bounds_key.assembly==sample.assembly){asset=prepared.skn_bounds_asset;present=true;}
- else asset=skn::select_visual(sample.assembly->gltf_name(),sample.assembly->main_hero_visual,present);
+ else asset=skn::select_visual(sample.assembly->skeleton->visual_reference,sample.assembly->main_hero_visual,present);
  if(!present){prepared.skn_bounds_asset.reset();prepared.skn_bounds_valid=false;return true;}
  if(prepared.skn_bounds_valid&&prepared.skn_bounds_physique==sample.physique&&asset==prepared.skn_bounds_asset&&owned_visual_pose_key_matches(prepared.skn_bounds_key,sample)){
   bounds=prepared.skn_bounds;return true;
@@ -2546,7 +2546,7 @@ bool retained_visual_gpu_pose(const RetainedVisualSample& sample,
     // need only socket ancestors; do not evaluate every legacy FIG node here.
     if(sample.values.unit) try {
         bool present=false;
-        const auto gltf=skn::select_gltf(assembly.gltf_name(),assembly.main_hero_visual,present);
+        const auto gltf=skn::select_gltf(assembly.skeleton->visual_reference,assembly.main_hero_visual,present);
         if(present) {
             if(!prepare_gltf_pose(sample,gltf))return false;
             pose=&current;return true;
@@ -2592,7 +2592,7 @@ int retained_visual_equipment_point(const RetainedVisualSample& sample,const cha
     const char* anchor,std::array<float,3>& point) noexcept try {
     if(!sample.assembly||!sample.assembly->skeleton||!sample.prepared)return 0;
     bool present=false;
-    const auto asset=skn::select_gltf(sample.assembly->gltf_name(),
+    const auto asset=skn::select_gltf(sample.assembly->skeleton->visual_reference,
         sample.assembly->main_hero_visual,present);
     if(!present||!asset->gltf_asset)return 0;
     NativeWorldGeometry::Pose* pose=nullptr;
@@ -3782,7 +3782,7 @@ bool retained_visual_merged_groups(const RetainedVisualSample& sample) {
     if (!prepared.gpu_pose.binding) return true;
     bool skn_present=false;
     try {
-     const auto skn_asset=skn::select_visual(assembly.gltf_name(),assembly.main_hero_visual,skn_present);
+     const auto skn_asset=skn::select_visual(assembly.skeleton->visual_reference,assembly.main_hero_visual,skn_present);
      prepared.skn_selected=skn_present;
      if(skn_present){
       const bool built=build_skn_groups(sample,skn_asset);
