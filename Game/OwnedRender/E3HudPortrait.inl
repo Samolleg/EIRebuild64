@@ -60,6 +60,9 @@ bool livePortrait(CI3DFigure* figure,CRenderer* game,unsigned slot,int unitId,co
         std::string expression;
         std::shared_ptr<OwnedPortraitOverlay> overlay;
         std::string lastResult;
+        std::uint64_t previewSerial=0;
+        std::shared_ptr<const VisualAssemblyAsset> fitSource;
+        std::array<float,3> fitLo{},fitHi{},faceLo{},faceHi{};
     };
     static std::array<Cache,32> caches;
     if (slot>=caches.size()) return false;
@@ -78,7 +81,9 @@ bool livePortrait(CI3DFigure* figure,CRenderer* game,unsigned slot,int unitId,co
     if (!id.serial || !scene.visual_preview_source(id,sample,revision) || !sample.assembly)
         return result("unit_visual_source");
     if (!cache.prepared || id.serial!=cache.resource.serial || id.signed_id!=cache.resource.signed_id) {
-        cache={}; cache.resource=id; cache.prepared=std::make_shared<VisualPreparedResources>();
+        static std::uint64_t nextPortrait=0;
+        cache={}; cache.resource=id;
+        cache.previewSerial=(std::uint64_t(3)<<62) | ++nextPortrait; cache.prepared=std::make_shared<VisualPreparedResources>();
     }
     HudAssetFrame frame;
     if (!embedded_hud_layout().portrait_frame(slot,frame)) return result("portrait_frame");
@@ -165,10 +170,13 @@ bool livePortrait(CI3DFigure* figure,CRenderer* game,unsigned slot,int unitId,co
             }
             for (const auto index : fit_parts)
                 if (fur_part_stem(sample.assembly->parts[index].name) == "hd") head_parts.push_back(index);
-            const bool boxed = retained_visual_neutral_parts_box(sample, fit_parts, lo, hi) &&
-                retained_visual_neutral_parts_box(sample, head_parts, face_lo, face_hi);
+            if (cache.fitSource!=sample.assembly) {
+                if (!retained_visual_neutral_parts_box(sample,fit_parts,cache.fitLo,cache.fitHi) ||
+                    !retained_visual_neutral_parts_box(sample,head_parts,cache.faceLo,cache.faceHi)) return result("head_box");
+                cache.fitSource=sample.assembly;
+            }
+            lo=cache.fitLo;hi=cache.fitHi;face_lo=cache.faceLo;face_hi=cache.faceHi;
             sample.assembly = drawn;
-            if (!boxed) { return result("head_box"); }
         }
         // Axes (first run, 85d2c383): the unit model is Z-up with its face
         // toward -Y; the face figure is Y-up (its box 1.5 x 2.2 x 1.9 against
@@ -207,7 +215,8 @@ bool livePortrait(CI3DFigure* figure,CRenderer* game,unsigned slot,int unitId,co
     command.presentation_serial=game->GetD3D()->ModelPreviewFrame();
     command.texture_time=theWorld.GetPreciseTime();
     command.fog=255;
-    sample.lifecycle=OwnedRender::E1Scene().Identity(unitId);
+    sample.resource.serial=cache.previewSerial;
+    sample.lifecycle={unitId,cache.previewSerial,cache.previewSerial};
     sample.values.unit=true;sample.selection={};sample.selection.neutral=true;
     sample.pose.phase=0;sample.prepared=cache.prepared;
     OwnedRender::ModelPreviewLighting light;
@@ -254,6 +263,7 @@ bool livePortrait(CI3DFigure* figure,CRenderer* game,unsigned slot,int unitId,co
     }
     auto sinks=std::make_shared<SceneSinks>();
     sinks->state=device->CaptureC56MaterialState();
+    if (!registryModel) sinks->state.viewport={0,0,DWORD(layout.width),DWORD(layout.height),0.f,1.f};
     command.sets.push_back(sinks);
     command.handoff.install_sinks=&SceneSinks::install;
     struct ClipScope {
