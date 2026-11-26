@@ -96,6 +96,7 @@ public:
     BOOL Load(FILE *file, bool bInVideo = false);
     BOOL Load(const SMMPFileHeader *pHdr, bool bInVideo = false);
     void DefaultSurfaceDesc(D3D11_TEXTURE2D_DESC *ptex2d);
+    HRESULT CaptureSaveThumbnail(UINT rows);
     HRESULT SaveThumbnailFile(LPCSTR path, UINT rows) noexcept;
     HRESULT LoadThumbnailFile(LPCSTR path, UINT rows) noexcept;
     // Assuming src is copy compatible without checks!

@@ -2165,6 +2165,8 @@ void append_raytracing_shader_programs(std::vector<ShaderProgram>& out){
  // NATIVE_RT_SUN). Every other frame draws the plain prepass, so the RT code
  // costs the raster path no registers.
  out.push_back({owned_native_shader_source(),nullptr,rt_sun,"nativePrepassPS","ps_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3});
+ out.push_back({owned_native_shader_source(),nullptr,rt_sun,"nativeRtUnitFilterPS","ps_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3});
+ out.push_back({owned_native_shader_source(),nullptr,rt_sun,"nativeRtUnitBlurXPS","ps_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3});
 }
 
 // The native programs and the first geometry page on the D3D12 backend.
@@ -2825,7 +2827,11 @@ HRESULT Renderer::update_contact_maps_d3d12(){
   const std::uint64_t bit=std::uint64_t{1}<<material;
   if(!(contact_maps_.pending&bit))continue;
   std::shared_ptr<const OwnedVisualSurface> surface;
-  if(!bridge_terrain_atlas(material,surface)||!surface){d3d12_->count("contact atlas: atlas surface not captured (retried)");continue;}
+  const char* failure=nullptr;
+  if(!bridge_terrain_atlas(material,surface,&failure)||!surface){
+   contact_pending_reason_[material]=failure?failure:"no atlas surface";
+   d3d12_->count("contact atlas: atlas surface not captured (retried)");continue;
+  }
   // Resolve the captured atlas generation, as the author's D3D11 path
   // does. Owned terrain bypasses terrain_texture_d3d12, so its legacy
   // page cache can stay empty forever. Without these copies Terrain 2.0
@@ -2834,7 +2840,8 @@ HRESULT Renderer::update_contact_maps_d3d12(){
   D3D12TextureRef source;UINT64 backing=0;
   const HRESULT resolved=get_native_owned_texture_d3d12(view,source,backing,nullptr,true);
   if(FAILED(resolved))return resolved;
-  if(!source)continue;
+  if(!source){contact_pending_reason_[material]="its page is not ready for upload";continue;}
+  contact_pending_reason_[material]=nullptr;
   const HRESULT copied=copy_contact_atlas_d3d12(*source,material,contact_maps_);
   if(FAILED(copied))return copied;
   if(copied==S_FALSE){ // each material is refused once (its pending bit is cleared)

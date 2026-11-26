@@ -3058,6 +3058,28 @@ public:
         return read_bgra(presenter_.back_buffer(), D3D12_RESOURCE_STATE_RENDER_TARGET, pixels, width, height);
     }
 
+    HRESULT read_scaled_back_buffer(const owned::ShaderProgram& stretch, UINT width, UINT height,
+                                    std::vector<std::uint8_t>& pixels) override {
+        if (!open_target()) return failure_.empty() ? E_PENDING : E_FAIL;
+        D3D12Texture* source = frame_image();
+        if (!source) source = screen_;
+        owned::D3D12TextureRef snapshot;
+        if (!source) {
+            // The swap chain buffer has no shader view. Copy it on the GPU first.
+            const UINT w = presenter_.width(), h = presenter_.height();
+            HRESULT hr = create_texture(w, h, Presenter::kFormat, snapshot);
+            if (FAILED(hr)) return hr;
+            hr = capture(*snapshot, 0, 0, RECT{0, 0, LONG(w), LONG(h)});
+            if (hr != S_OK) return hr;
+            source = snapshot.get();
+        }
+        UINT readWidth = 0, readHeight = 0;
+        const HRESULT hr = read_scaled(*source, stretch, width, height, pixels, readWidth, readHeight);
+        if (hr == S_OK && (readWidth != width || readHeight != height ||
+                          pixels.size() != size_t(width) * height * 4)) return E_FAIL;
+        return hr;
+    }
+
     void set_frame_image(bool wanted) noexcept override {
         frame_image_wanted_ = wanted;
         if (!wanted && !frame_image_active_) frame_image_.reset();  // its release waits for the frames that read it

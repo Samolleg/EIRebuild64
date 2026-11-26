@@ -851,6 +851,16 @@ HRESULT Renderer::read_embedded_d3d12_output(std::vector<std::uint8_t>& pixels,U
  }catch(...){return E_OUTOFMEMORY;}
 }
 
+HRESULT Renderer::read_save_thumbnail(UINT width, UINT height, std::vector<std::uint8_t>& pixels) {
+ SCENE_ENTRY("embedded_save_thumbnail");
+ if (!d3d12_ || hit_test_active_) return DXGI_ERROR_INVALID_CALL;
+ HRESULT hr = composite_world();
+ if (SUCCEEDED(hr)) hr = flush_native();
+ if (SUCCEEDED(hr)) hr = flush_ui();
+ if (FAILED(hr)) return hr;
+ return d3d12_->read_scaled_back_buffer(d3d12_stretch_program(), width, height, pixels);
+}
+
 HRESULT Renderer::read_embedded_viewport(D3DVIEWPORT7& viewport){
  SCENE_ENTRY("embedded_read_viewport");
  viewport={};

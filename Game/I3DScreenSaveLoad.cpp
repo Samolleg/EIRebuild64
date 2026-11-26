@@ -917,14 +917,18 @@ void CI3DScreenSaveLoad::QuickSave(LPCTSTR pszSlotName, bool bIsAuto)
     if(ModEncounter::AccessLocked())return;
     GameJournal::Source source(bIsAuto?"auto":"manual_quick");
     if(!IsEnoughSpace())return;
-    if(bIsAuto)NGame::DrawFrame(false);
-    auto screen=std::make_unique<CI3DSurface>(&theInterface,0,0,800,600,BS_VISIBLE);
-    screen->GetFromScreen(true);
+    // F5 runs between presents. Draw into the current buffer before capturing it.
+    NGame::DrawFrame(false);
     SSaveSlotDesc desc;desc.szPath=pszSlotName;desc.szName="";desc.time=CTime32::GetCurrentTime();
     desc.fGameTime=IWorldClient.GSGetVar(szPartyGlobalTimeVarName);desc.szZoneName=IWorldClient.GetCurrentZoneName();
     if(auto *zone=theMap.GetZoneByName(desc.szZoneName))desc.szAllodName=zone->szAllodName;
     try{
-        auto thumbnail=SmallScreenFromScreen(screen.get());
+        auto thumbnail = std::make_unique<CDXGISurface>(theInterface.GetD3D(), BG_SMALL_PICTURE.cx, BG_SMALL_PICTURE.cx);
+        const HRESULT capture = thumbnail->CaptureSaveThumbnail(BG_SMALL_PICTURE.cy);
+        if (capture != S_OK) {
+            GameJournal::Event("SAVE", "thumbnail_unavailable", "hr=0x%08x", unsigned(capture));
+            thumbnail.reset();
+        }
         SaveSchema::Slot::SetPresentation(desc,thumbnail.get());
         struct CursorReset { ~CursorReset(){theCursor.SetMode(CT_DEFAULT);} } cursorReset;
         theCursor.SetMode(CT_WAIT);
