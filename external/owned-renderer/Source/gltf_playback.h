@@ -1,5 +1,6 @@
 #pragma once
 #include "gltf_animation.h"
+#include "riding_idle.h"
 #include <set>
 
 namespace owned::gltf {
@@ -112,9 +113,10 @@ struct PlaybackState {
     bool active=false;
     ActionToken action;
     Playback value;
-    double last_clock=0,transition_start=0;
+    double last_clock=0,transition_start=0,transition_duration=.12;
     EventCursor events;
-    Playback Update(unsigned clip,float time,const ActionToken& next,double clock,bool seek,bool instant=false){
+    RidingIdleState riding_idle;
+    Playback Update(unsigned clip,float time,const ActionToken& next,double clock,bool seek,bool instant=false,float fadeSeconds=.12f){
         animation_require(std::isfinite(clock)&&std::isfinite(time),"playback clock");
         const bool reset=!active||seek||clock<last_clock;
         if(reset)value={clip,UINT32_MAX,time,0,1};
@@ -124,8 +126,9 @@ struct PlaybackState {
             // replays a previous action or needs an unbounded blend stack.
             const bool fade=!instant&&value.blend>=1;
             value={clip,fade?value.clip:UINT32_MAX,time,value.time,fade?0.f:1.f};transition_start=clock;
+            transition_duration=(std::max)(.01,double(fadeSeconds));
         }else value.time=time;
-        if(value.blend<1)value.blend=float((std::clamp)((clock-transition_start)/.12,0.0,1.0));
+        if(value.blend<1)value.blend=float((std::clamp)((clock-transition_start)/transition_duration,0.0,1.0));
         action=next;active=true;last_clock=clock;return value;
     }
 };
