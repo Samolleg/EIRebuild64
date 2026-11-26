@@ -235,6 +235,7 @@ void CI3DScreenMission::OnActivate()
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenMission::OnDeactivate()
 {
+    CancelRidingApproach();
     OwnedRender::E1TextRetire(OwnedRender::E1TextKind::pane);
     OwnedRender::E3MissionLeave(this);
     DW_SEGMENT_TIME = DW_DEFAULT_SEGMENT_TIME;
@@ -496,6 +497,191 @@ void CI3DScreenMission::QuestUpdate(LPCTSTR pszQuestVar, float fState)
     nQuestSound = Max(nQuestSound, (int)fState);
 }
 /////////////////////////////////////////////////////////////////////////////////////
+namespace {
+bool Rideable(CUnit* unit) {
+    return unit && !unit->IsDead() && unit->GetMaskName() &&
+        _stricmp(unit->GetMaskName(),"unanhoho") == 0;
+}
+CUnitServer* RidingDriver(CUnit* unit) {
+    return unit ? dynamic_cast<CUnitServer*>(unit->GetUnitSpecific()) : nullptr;
+}
+void WalkToRidingPoint(CUnit* rider,const Navigation::Location& side) {
+    auto& logic=RidingDriver(rider)->logic;
+    if(auto* player=logic.GetPlayer()) {
+        // Register the order with the same AI owner as a ground click. The idle
+        // player motivation can otherwise replace an isolated low-level order.
+        player->DoMoveTo(logic,CPlot3D(side.position.x,side.position.y,0),false,true,CPlot3D(0,0,0));
+    }
+}
+bool RidingSide(CUnit* rider,CUnit* horse,Navigation::Location& side) {
+    auto& map=theWorldServer.aiMap;
+    auto& nav=map.Navigation();
+    const auto center=nav.Position(horse,map);
+    const float inner=(std::max)(.8f,nav.CollisionRadius(horse)+nav.CollisionRadius(rider));
+    return nav.FreePosition(rider,center,inner,inner+.65f,1.e6f,side,horse->GetID());
+}
+// Test a small patch at the withers on either side. A free point behind
+// the tail or in front of the muzzle cannot start a mounting animation.
+bool RidingFlank(CUnit* rider,CUnit* horse,Navigation::Location& side,int& sign) {
+    auto& map=theWorldServer.aiMap;
+    auto& nav=map.Navigation();
+    auto center=nav.Position(horse,map);
+    const auto axis=horse->GetXAxis();
+    const auto offset=rider->GetCP()-horse->GetCP();
+    const int nearSide=offset.x*axis.x+offset.y*axis.y >= 0 ? 1 : -1;
+    // The contact position belongs to the flank, not the horse's long-axis
+    // navigation circle. Keep a shoe-width of room outside the barrel.
+    constexpr float radius=.76f;
+    const float horizontal=std::hypot(axis.x,axis.y);
+    if(horizontal<.01f)return false;
+    for(int flank : {nearSide,-nearSide}) {
+        const Navigation::Point goal{center.x+flank*radius*axis.x/horizontal,center.y+flank*radius*axis.y/horizontal,center.z};
+        if(nav.FreePosition(rider,goal,0,.14f,1.e6f,side,horse->GetID()) &&
+           std::hypot(side.position.x-goal.x,side.position.y-goal.y)<.16f) {
+            sign=flank;
+            return true;
+        }
+    }
+    return false;
+}
+bool PlaceBesideHorse(CUnit* rider,CUnit* horse,bool landing=false) {
+    Navigation::Location side;
+    if(landing) {
+        if(!RidingFlank(rider,horse,side,rider->rideFlank))return false;
+    } else if(!RidingSide(rider,horse,side))return false;
+    auto& map=theWorldServer.aiMap;
+    CPlot3D point(side.position.x,side.position.y,0);
+    point.z=side.position.z-map.GetTileHeight(point);
+    if(!map.MoveObject(rider,point))return false;
+    rider->navLocation=side;
+    RidingDriver(rider)->InitializeUnit();
+    rider->LowNewRoute();
+    rider->SetUpdateMask(CMapObject::VLD_MASK_POSROT);
+    return true;
+}
+CString RidingSaveKey(CUnit* rider) {
+    CString key;
+    key.Format("jmv.riding.%s.%d.",theWorldServer.GetCurrentZoneName().GetString(),rider->GetID());
+    return key;
+}
+void StoreRiding(CUnit* rider) {
+    if(!rider->GetOwner())return;
+    auto& vars=rider->GetOwner()->party.vars;
+    const CString key=RidingSaveKey(rider);
+    if(rider->ridingHorse<0) {
+        vars.DelVar(key+"hi"); vars.DelVar(key+"lo");
+    } else {
+        vars.SetVar(key+"hi",float(1+(rider->ridingHorse>>16)));
+        vars.SetVar(key+"lo",float(rider->ridingHorse&65535));
+    }
+}
+void RestoreRiding(CUnit* rider) {
+    if(rider->ridingRestored || !rider->GetOwner())return;
+    rider->ridingRestored=true;
+    auto& vars=rider->GetOwner()->party.vars;
+    const CString key=RidingSaveKey(rider);
+    const int hi=int(vars.GetVar(key+"hi")),lo=int(vars.GetVar(key+"lo"));
+    if(hi<=0 || hi>32768 || lo<0 || lo>65535)return;
+    const int id=((hi-1)<<16)|lo;
+    if(auto* horse=theWorldServer.GetUnit(id); Rideable(horse) && !rider->IsDead()) {
+        rider->ridingHorse=id;horse->ridingPassenger=rider->GetID();
+        rider->rideTransitionTick=-1000;
+        GameJournal::Event("RIDING","restored","rider=%d horse=%d",rider->GetID(),id);
+    } else StoreRiding(rider);
+}
+const int RidingSkill = -3;
+}
+bool CI3DScreenMission::Dismount(CUnit* client) {
+    auto* rider = client ? theWorldServer.GetUnit(client->GetID()) : nullptr;
+    if (!rider || rider->ridingHorse < 0 || rider->RidingTransition(theWorld.GetRenderTimeSegments())) return false;
+    auto* horse = theWorldServer.GetUnit(rider->ridingHorse);
+    if (horse && RidingDriver(horse)) {
+        RidingDriver(horse)->CmdWait();
+        if(!PlaceBesideHorse(rider,horse,true))return false;
+        // Publish the landing heading to the same route that owns standing and
+        // the next footstep. Otherwise the body snaps back to its pre-ride yaw.
+        const float local=-18.f*rider->rideFlank*FP_PI/180.f;
+        const auto fore=horse->GetYAxis(),side=horse->GetXAxis();
+        const float heading=std::atan2(side.y*std::sin(local)-fore.y*std::cos(local),
+            side.x*std::sin(local)-fore.x*std::cos(local));
+        rider->SetOrientation(CQuaternion(CPlot3D(0,0,1),heading+FP_PI2));
+        RidingDriver(rider)->FaceScriptRoute(heading);
+        rider->SetUpdateMask(CMapObject::VLD_MASK_POSROT);
+    }
+    // Keep the mount still until both feet have landed.
+    rider->dismountHorse = horse ? horse->GetID() : -1;
+    rider->rideTransitionTick = theWorld.GetRenderTimeSegments();
+    theCamera.SetCarrier(client);
+    rider->ridingHorse = -1;
+    StoreRiding(rider);
+    GameJournal::Event("RIDING","dismount","rider=%d",rider->GetID());
+    return true;
+}
+void CI3DScreenMission::CancelRidingApproach() {
+    if (approachingHorse >= 0 && theWorldServer.GetMapObjectManager()) {
+        auto* horse=theWorldServer.GetUnit(approachingHorse);
+        if(horse && horse->ridingPassenger==approachingRider) horse->ridingPassenger=-1;
+    }
+    approachingHorse=approachingRider=-1;
+    ridingClearanceStep=false;
+}
+void CI3DScreenMission::UpdateRidingApproach() {
+    if (!theWorldServer.GetMapObjectManager()) return;
+    if (approachingHorse < 0) {
+        // Keep the actor within the ridden unit's perception and trigger area.
+        // Its independent navigation cell remains beside the horse.
+        for (int i=0;i<pUnits.GetSize();++i) {
+            if (!pUnits[i]) continue;
+            auto* rider=theWorldServer.GetUnit(pUnits[i]->GetID());
+            if (!rider) continue;
+            RestoreRiding(rider);
+            if(rider->dismountHorse>=0 && !rider->RidingTransition(theWorld.GetRenderTimeSegments())) {
+                auto* landed=theWorldServer.GetUnit(rider->dismountHorse);
+                if(landed && landed->ridingPassenger==rider->GetID())landed->ridingPassenger=-1;
+                rider->dismountHorse=-1;
+            }
+            if (rider->ridingHorse<0 || rider->RidingTransition(theWorld.GetRenderTimeSegments())) continue;
+            auto* horse=theWorldServer.GetUnit(rider->ridingHorse);
+            if (!Rideable(horse) || rider->IsDead()) { Dismount(pUnits[i]); continue; }
+            auto delta=rider->GetCP()-horse->GetCP();
+            if (delta.x*delta.x+delta.y*delta.y<6.25f) continue;
+            PlaceBesideHorse(rider,horse);
+        }
+        return;
+    }
+    auto* rider = theWorldServer.GetUnit(approachingRider);
+    auto* horse = theWorldServer.GetUnit(approachingHorse);
+    if (!Rideable(horse) || !RidingDriver(rider) || rider->IsDead()) {
+        CancelRidingApproach();
+        return;
+    }
+    const auto gap=rider->GetCP()-ridingApproachPoint;
+    if(std::hypot(gap.x,gap.y)>.55f) {
+        if(theWorld.GetRenderTimeSegments()-ridingOrderTick>32 && RidingDriver(rider)->HasNoCommand() && !rider->IsMoving())
+            CancelRidingApproach();
+        return;
+    }
+    if(ridingClearanceStep) {
+        ridingClearanceStep=false;
+        ridingOrderTick=theWorld.GetRenderTimeSegments();
+        ridingApproachPoint=CPlot3D(ridingFlankSupport.position.x,ridingFlankSupport.position.y,0);
+        WalkToRidingPoint(rider,ridingFlankSupport);
+        return;
+    }
+    if(std::abs(rider->GetCP().z-horse->GetCP().z)>1.4f){CancelRidingApproach();return;}
+    auto& logic=RidingDriver(rider)->logic;
+    if(auto* player=logic.GetPlayer())player->DoStop(logic);
+    RidingDriver(rider)->CmdWait();
+    RidingDriver(horse)->CmdWait();
+    horse->ridingPassenger = rider->GetID();
+    rider->rideTransitionTick = theWorld.GetRenderTimeSegments();
+    rider->dismountHorse = -1;
+    rider->ridingHorse = approachingHorse;
+    StoreRiding(rider);
+    theCamera.SetCarrier(DWORD(approachingHorse));
+    approachingHorse = -1;
+    GameJournal::Event("RIDING","mount","rider=%d horse=%d flank=%d",rider->GetID(),horse->GetID(),rider->rideFlank);
+}
 void CI3DScreenMission::AllMove(CPlot3D plot, bool bSwarm, bool bRun)
 {
     // checking exits
@@ -519,6 +705,17 @@ void CI3DScreenMission::AllMove(CPlot3D plot, bool bSwarm, bool bRun)
     for (i = 0; i < pUnits.GetSize(); i++)
         if (pUnits[i] && pUnits[i]->CheckFlag(OBJ_SELECTED))
         {
+            CancelRidingApproach();
+            auto* rider = theWorldServer.GetMapObjectManager() ? theWorldServer.GetUnit(pUnits[i]->GetID()) : nullptr;
+            if (rider && rider->RidingTransition(theWorld.GetRenderTimeSegments())) continue;
+            auto* horse = rider && rider->ridingHorse >= 0 ? theWorldServer.GetUnit(rider->ridingHorse) : nullptr;
+            if (Rideable(horse) && RidingDriver(horse)) {
+                const auto delta=plot-horse->GetCP();
+                const bool gallop=bRun || delta.x*delta.x+delta.y*delta.y>=16.f;
+                RidingDriver(horse)->CmdMoveTo(plot,gallop);
+                GameJournal::Event("RIDING","move","horse=%d gait=%s x=%.2f y=%.2f",horse->GetID(),gallop?"gallop":"walk",plot.x,plot.y);
+                continue;
+            }
             units.Add(pUnits[i]);
             pFaces->PlayAnim(i, 1);
         }
@@ -760,6 +957,7 @@ void CI3DScreenMission::SetInputMode(int nMode, int nSlot, int nPar)
     case MODE_SPELL_TARGET_TILE:
         pSpells->ShowSelectSpell(nSlot, TRUE);
         break;
+    case MODE_RIDE_TARGET:
     case MODE_SKILL_TARGET_UNIT:
     case MODE_SKILL_TARGET_OBJECT:
         pSkills->ShowSelectSkill(nSlot, TRUE);
@@ -817,6 +1015,7 @@ ERPGHitLocations CI3DScreenMission::GetCShotState()
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenMission::OnIdle()
 {
+    UpdateRidingApproach();
     static int fieldCampHeroId = -1;
     static DWORD fieldCampFinalizeStart = 0;
     static bool fieldCampMusicReady = false;
@@ -1240,6 +1439,65 @@ void CI3DScreenMission::PerformAction(CUnit *pU, CPoint point)
         }
         break;
 
+    case MODE_RIDE_TARGET:
+        if (pHero && Rideable(pU) && theWorldServer.GetMapObjectManager()) {
+            auto* rider = theWorldServer.GetUnit(pHero->GetID());
+            auto* horse = theWorldServer.GetUnit(pU->GetID());
+            if (RidingDriver(rider) && RidingDriver(horse) && rider->ridingHorse < 0 && !rider->RidingTransition(theWorld.GetRenderTimeSegments())) {
+                CancelRidingApproach();
+                if (horse->ridingPassenger >= 0) break;
+                RidingDriver(horse)->CmdWait();
+                approachingRider = rider->GetID();
+                approachingHorse = horse->GetID();
+                horse->ridingPassenger = rider->GetID();
+                Navigation::Location side;
+                if (RidingFlank(rider,horse,side,rider->rideFlank)) {
+                    ridingOrderTick=theWorld.GetRenderTimeSegments();
+                    ridingFlankSupport=side;
+                    auto& map=theWorldServer.aiMap;
+                    auto& nav=map.Navigation();
+                    const auto center=nav.Position(horse,map);
+                    const auto from=nav.Position(rider,map);
+                    const float dx=from.x-center.x,dy=from.y-center.y;
+                    const float distance=std::hypot(dx,dy);
+                    const float radius=nav.CollisionRadius(horse)+nav.CollisionRadius(rider);
+                    if(distance>.02f && distance<radius+.08f && (dx*horse->GetXAxis().x+dy*horse->GetXAxis().y)*rider->rideFlank<0) {
+                        // A saved/placed actor may already overlap the horse's
+                        // navigation circle. Walk out radially before rounding it.
+                        const float scale=(radius+.55f)/distance;
+                        // When two horses stand close, the radial exit itself
+                        // may be occupied. Fan toward the selected flank first.
+                        const float handed=dx*(side.position.y-center.y)-dy*(side.position.x-center.x)>=0 ? 1.f : -1.f;
+                        for(float angle : {0.f,.92f,-.92f,.48f,-.48f}) {
+                            const float c=std::cos(angle),s=std::sin(angle)*handed;
+                            Navigation::Point outside{center.x+(dx*c-dy*s)*scale,center.y+(dy*c+dx*s)*scale,from.z};
+                            Navigation::Location clear;
+                            if(nav.FreePosition(rider,outside,0,.30f,1.e6f,clear,horse->GetID()) &&
+                               (clear.position.x-from.x)*dx+(clear.position.y-from.y)*dy>0) {
+                                ridingClearanceStep=true;
+                                side=clear;
+                                break;
+                            }
+                        }
+                        if(!ridingClearanceStep) {
+                            CancelRidingApproach();
+                            SetInputMode(MODE_SIMPLE);
+                            break;
+                        }
+                    }
+                    ridingApproachPoint=CPlot3D(side.position.x,side.position.y,0);
+                    const CPlot3D target(side.position.x,side.position.y,1.e6f);
+                    GameJournal::Event("RIDING","approach","horse=%d side=%d clearance=%d target=(%.2f,%.2f) flank=(%.2f,%.2f)",horse->GetID(),rider->rideFlank,int(ridingClearanceStep),target.x,target.y,ridingFlankSupport.position.x,ridingFlankSupport.position.y);
+                    WalkToRidingPoint(rider,side);
+                    UpdateRidingApproach();
+                } else {
+                    GameJournal::Event("RIDING","flank_unavailable","horse=%d",horse->GetID());
+                    CancelRidingApproach();
+                }
+                SetInputMode(MODE_SIMPLE);
+            }
+        }
+        break;
     case MODE_SKILL_TARGET_OBJECT:
         if (pU)
             pObj = pU;
@@ -1488,6 +1746,9 @@ void CI3DScreenMission::CheckAction(CUnit *pU, CPoint point)
             theCursor.SetMode(CT_CANCEL);
         break;
 
+    case MODE_RIDE_TARGET:
+        theCursor.SetMode(pHero && Rideable(pU) ? CT_USE : CT_CANCEL);
+        break;
     case MODE_SKILL_TARGET_OBJECT:
         if (pU)
             pObj = pU;
@@ -3246,6 +3507,7 @@ void CI3DObjectSkills::RemoveAllSkills()
     iSelected = -1;
     fieldCampButtonLastUpdate = 0;
     fieldCampButtonAvailability = -1;
+    lastRideTip = -1;
     for (int i = 0; i < 6; i++)
         GetArea(i)->SetToolTip(0);
 }
@@ -3375,6 +3637,11 @@ void CI3DObjectSkills::SetUnit(CUnit *pNewUnit, bool bIsSomeone)
         else goCampToolTip = "Camp";
         text->CloseText();
         GetArea(nSkills - 1)->SetToolTip(goCampToolTip, 1);
+        if (pUnit && theWorldServer.GetMapObjectManager() &&
+            IWorldClient.GetPlayer()->GetPlayer()->IsMainHero(pUnit)) {
+            AddSkill("initqi1item","jmv_mount",RidingSkill);
+            GetArea(nSkills-1)->SetToolTip("\xd1\xe5\xf1\xf2\xfc\x20\xed\xe0\x20\xeb\xee\xf8\xe0\xe4\xfc",1);
+        }
     }
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -3432,6 +3699,12 @@ void CI3DObjectSkills::ChangeSkill(int nSlot)
     WideScreen::Scope wideScope(owned::widescreen::kBottomLeft);
     if (ModRuntime::Current() && nSlot >= 0 && nSlot < nSkills) {
         const int command = nTypes[nSlot];
+        if (command == RidingSkill && pUnit) {
+            auto* rider = theWorldServer.GetUnit(pUnit->GetID());
+            if (rider && rider->ridingHorse >= 0) pScreen->Dismount(pUnit);
+            else pScreen->SetInputMode(MODE_RIDE_TARGET,nSlot,RidingSkill);
+            return;
+        }
         if (command == -1) { pI3D->BeginFX("buttons\\battle\\click.wav"); ShowTacticsMenu(); return; }
         if (command <= LS_COMPANION_MENU_CLOSE && command >= LS_COMPANION_MENU_BACK) {
             auto units = SelectedTacticsUnits(pScreen);
@@ -3492,6 +3765,16 @@ void CI3DObjectSkills::ChangeSkill(int nSlot)
 BOOL CI3DObjectSkills::Draw(CRenderer *pRend)
 {
     WideScreen::Scope wideScope(owned::widescreen::kBottomLeft);
+    for(int i=0;i<nSkills;++i) {
+        if(nTypes[i]!=RidingSkill || !pUnit || !theWorldServer.GetMapObjectManager()) continue;
+        auto* rider=theWorldServer.GetUnit(pUnit->GetID());
+        const int mounted=rider && rider->ridingHorse>=0;
+        if(mounted!=lastRideTip && OwnedRender::E3HudIcon(OwnedRender::E3HudLane::skill,
+            mounted ? "jmv_dismount" : "jmv_mount",256,64,64,64,64,(i/4)*64,(i%4)*64)) {
+            GetArea(i)->SetToolTip(mounted?"\xd1\xeb\xe5\xe7\xf2\xfc\x20\xf1\x20\xeb\xee\xf8\xe0\xe4\xe8":"\xd1\xe5\xf1\xf2\xfc\x20\xed\xe0\x20\xeb\xee\xf8\xe0\xe4\xfc",1);
+            lastRideTip=mounted;
+        }
+    }
     bool hasFieldCampButton = false;
     for (int i = 0; i < nSkills; ++i)
     {

@@ -6,6 +6,7 @@
 #include "E1Scene.h"
 #include "E3Combat.h"
 #include "../WorldClient.h"
+#include "../WorldServer.h"
 #include "../Object3DClientSpecific.h"
 #include "../Unit.h"
 #include "../ModEncounter.h"
@@ -106,7 +107,56 @@ bool completeVisualFrame(owned::RetainedVisualFrame& frame, bool combat) noexcep
         auto* unit=static_cast<CUnit*>(object);
         if (combat) E3CombatPublishUnit(unit);
         sample.completed_pose=true;
+        if (theWorldServer.GetMapObjectManager()) {
+            auto* horse=theWorldServer.GetUnit(unit->GetID());
+            if (horse && horse->ridingPassenger>=0) {
+                auto* rider=theWorldServer.GetUnit(horse->ridingPassenger);
+                sample.riding_reins_held=rider && rider->ridingHorse==horse->GetID() &&
+                    !rider->RidingTransition(theWorld.GetRenderTimeSegments());
+                sample.riding_calm=sample.riding_reins_held && !horse->IsMoving() && !horse->IsDead();
+            }
+        }
         if (sample.assembly->main_hero_visual) sample.physique = unit->VisualPhysiqueInput();
+        if (sample.assembly->main_hero_visual && theWorldServer.GetMapObjectManager()) {
+            auto* actor = theWorldServer.GetUnit(unit->GetID());
+            const double dt = actor ? theWorld.GetRenderTimeSegments()-actor->rideTransitionTick : 0;
+            const bool exiting = actor && actor->ridingHorse<0 && actor->dismountHorse>=0 && dt>=0 && dt<CUnit::rideDismountTicks;
+            const int horseId = actor ? (exiting ? actor->dismountHorse : actor->ridingHorse) : -1;
+            if (horseId>=0) {
+                const auto it=std::find_if(frame.entities.begin(),frame.entities.end(),[horseId](const auto& other) {
+                    return other.resource.signed_id==horseId && other.status==owned::RetainedVisualStatus::ready;
+                });
+                if (it!=frame.entities.end()) {
+                    const bool transition=actor->RidingTransition(theWorld.GetRenderTimeSegments());
+                    const auto* mountedHorse=theWorldServer.GetUnit(horseId);
+                    sample.riding_calm=!transition && mountedHorse && !mountedHorse->IsMoving() && !mountedHorse->IsDead();
+                    const float progress=std::clamp(float(dt/(exiting?CUnit::rideDismountTicks:CUnit::rideMountTicks)),0.f,1.f);
+                    auto seat=it->object_pose.position;
+                    if(transition) {
+                        // The clip carries the pelvis from the near flank to
+                        // the back. Correct the approach/landing offset for this ground.
+                        const auto* horse=theWorld.GetMapObject(horseId);
+                        if(horse) {
+                            const auto axis=horse->GetXAxis();
+                            float edge=exiting?progress:1-progress;
+                            edge=std::clamp((edge-.4f)/.6f,0.f,1.f);
+                            edge=edge*edge*(3-2*edge);
+                            seat[0]+=edge*(sample.object_pose.position[0]-seat[0]-axis.x*actor->rideFlank*.76f);
+                            seat[1]+=edge*(sample.object_pose.position[1]-seat[1]-axis.y*actor->rideFlank*.76f);
+                            seat[2]+=edge*(sample.object_pose.position[2]-seat[2]-axis.z*actor->rideFlank*.76f);
+                        }
+                        sample.rideProgress=progress;
+                        sample.rideTransition=(exiting?2:1)*actor->rideFlank;
+                    } else seat[2]+=.55f;
+                    sample.object_pose.position=seat;
+                    sample.object_pose.quaternion=it->object_pose.quaternion;
+                    sample.pose.root=seat;
+                    sample.pose.root_rotation=sample.object_pose.quaternion;
+                    sample.pose.root_rotation_valid=true;
+                    sample.riding=true;
+                }
+            }
+        }
         sample.secondary_physics=true;
         sample.secondary_frozen=theWorld.IsCombatPause();
         sample.secondary_clock=theWorld.GetRenderTimeSegments()*PhysicsFx::TickSeconds;
