@@ -77,6 +77,7 @@ private:
     CString szPrimaryTextureName;   // primary texture name (for further loading)
     CString szSecondaryTextureName; // secondary texture name (for further loading)
     //
+    std::vector<CRect> nativePickParts;
     float fpTime;
     DWORD dwLastLightTime; // time, then this object was relighted (in milliseconds)
     struct NeutralPose {

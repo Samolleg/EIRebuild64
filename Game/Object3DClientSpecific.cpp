@@ -25,6 +25,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "environment_asset.h"
 #include "ServerConsts.h"
 #include "FigureClientSpecific.h"
+#include "FigureScreenBounds.h"
 #include "AnimationSystem2.h"
 #include "OwnedRender/E1Scene.h"
 #include "OwnedRender/E1VisualFrame.h"
@@ -1124,7 +1125,36 @@ bool CObject3DClientSpecific::PrepareOwnedVisual(CRenderer *pRend, bool visibleO
         }
         return published;
     }
-    if (static_cast<CObject3D*>(lpObject)->GetEnvironment()) return published;
+    if (const auto& base=static_cast<CObject3D*>(lpObject)->GetEnvironment()) {
+        if (!base->native_model || lpObject->WhoAmI()!=HPC_UNIT) return published;
+        coreParts.Stage(CorePerf::Picking);
+        nativePickParts.clear();
+        lpObject->rcScreenRect.SetRectEmpty();
+        if (!published) return false;
+        auto* object=static_cast<CObject3D*>(lpObject);
+        object->CreateCurrentPlacement();
+        SHMatrix placement;
+        object->GetPlacement(placement);
+        const auto matrix=pRend->GetGeometryProcessor()->GetWorldToScreenMatrix()*placement;
+        const auto& pose=nativePose && nativePose->motion==base->motion ? nativePose : base;
+        for (const auto& part:pose->parts) {
+            if (!part.render || !part.geometry || part.geometry->bounds.empty() ||
+                !owned::environment::selected(part,object->GetEnvironmentSelection())) continue;
+            const auto& box=part.geometry->bounds.front();
+            FigureScreenBounds::Point vertices[8];
+            for (unsigned i=0;i<8;++i) {
+                const auto v=matrix.Rotate4Vector(CPlot3D((i&1)?box.maximum[0]:box.minimum[0],
+                    (i&2)?box.maximum[1]:box.minimum[1],(i&4)?box.maximum[2]:box.minimum[2]));
+                vertices[i]={v.x,v.y,v.w};
+            }
+            FigureScreenBounds::Bounds bounds;
+            bounds.AddBox(vertices);
+            if (!bounds.valid) continue;
+            nativePickParts.emplace_back(bounds.Left(),bounds.Top(),bounds.Right(),bounds.Bottom());
+            lpObject->rcScreenRect |= nativePickParts.back();
+        }
+        return published;
+    }
     const auto type = lpObject->WhoAmI();
     auto* mapObject = dynamic_cast<CMapObject*>(lpObject);
     if (published && owned::bridge_skip_scenery_draw_walk_enabled() &&
@@ -1382,6 +1412,9 @@ BOOL CObject3DClientSpecific::IsCanSelect(const CPoint &point)
     if (!lpObject->CheckFlag(OBJ_VISIBLE))
         return FALSE;
 
+    if (pObject->GetEnvironment() && pObject->GetEnvironment()->native_model)
+        return std::any_of(nativePickParts.begin(),nativePickParts.end(),[&](const CRect& part){ return part.PtInRect(point); });
+
     for (i = 0; i < pObject->figures.GetSize(); i++)
     {
         if (pObject->figures[i]->CheckFlag(FIG_VISIBLE) &&
@@ -1403,6 +1436,9 @@ BOOL CObject3DClientSpecific::IsCanSelect(const CRect &rect)
 
     if (!lpObject->CheckFlag(OBJ_VISIBLE))
         return FALSE;
+
+    if (pObject->GetEnvironment() && pObject->GetEnvironment()->native_model)
+        return std::any_of(nativePickParts.begin(),nativePickParts.end(),[&](const CRect& part){ return rcIntersect.IntersectRect(part,rect); });
 
     for (i = 0; i < pObject->figures.GetSize(); i++)
     {
