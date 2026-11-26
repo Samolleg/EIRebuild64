@@ -47,7 +47,13 @@
 namespace remote {
 void host_log(const char* format, ...);
 extern std::atomic<std::uint64_t> g_startup_pipeline_progress;
-extern std::atomic<std::int64_t> g_host_idle_ticks;  // remote_host.cpp: the stream thread asleep for game records
+// The embedded renderer executes on the game's frame thread.
+#ifdef EID3D11_EMBEDDED
+static constexpr std::int64_t stream_idle_ticks() noexcept { return 0; }
+#else
+extern std::atomic<std::int64_t> g_host_idle_ticks;
+static std::int64_t stream_idle_ticks() noexcept { return g_host_idle_ticks.load(std::memory_order_relaxed); }
+#endif
 }
 extern "C" { extern const UINT D3D12SDKVersion; }  // Host/host.cpp: the Agility SDK the host asks for
 
@@ -6306,7 +6312,7 @@ private:
     // Closes the running pass's segment and opens `next` (nullptr: none).
     void slow_pass(const char* next) noexcept {
         const std::int64_t now = slow_now();
-        const std::int64_t idle = remote::g_host_idle_ticks.load(std::memory_order_relaxed);
+        const std::int64_t idle = remote::stream_idle_ticks();
         if (!slow_.start) { slow_.start = slow_.pass_start = now; slow_.segment_idle = slow_.idle_mark = idle; }
         // Sleeping for the game's next records is not the pass's time either.
         const std::int64_t own = (std::max)(std::int64_t(0), now - slow_.pass_start - slow_.segment_waits - (idle - slow_.segment_idle));
@@ -6326,7 +6332,7 @@ private:
     }
     void slow_frame_end() noexcept {
         const std::int64_t now = slow_now();
-        const std::int64_t idle_mark = remote::g_host_idle_ticks.load(std::memory_order_relaxed);
+        const std::int64_t idle_mark = remote::stream_idle_ticks();
         if (slow_.start) {
             const double total = slow_ms(now - slow_.start), idle = slow_ms(idle_mark - slow_.idle_mark);
             const double busy = total - idle - slow_ms(slow_.limiter);
