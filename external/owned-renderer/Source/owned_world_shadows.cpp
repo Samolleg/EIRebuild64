@@ -2727,8 +2727,7 @@ bool prepare_owned_world_shadows_from(OwnedShadowInputs in,
         const auto flags=in.flags;
         const bool draw_undetected=in.draw_undetected;
         const auto shadow_source_revision=in.shadow_source_revision;
-        const auto shadow_lighting=shadow_projection_lighting(
-            g_native_world_lighting_frame.lighting);
+        const auto& shadow_lighting=g_native_world_lighting_frame.lighting;
         auto& shadow_scene=retained_visual_scene();
         const bool terrain_enabled=(flags&0x100u)!=0 && g_owned_terrain_frame.source_values.terrain;
         std::vector<NativeWorldBounds> receivers;

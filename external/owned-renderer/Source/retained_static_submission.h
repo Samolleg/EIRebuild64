@@ -134,7 +134,6 @@ bool retained_world_bounds_inside(const NativeWorldBounds& bounds,
     const std::array<float, 16>& world_to_clip) noexcept;
 bool retained_world_bounds_visible(const NativeWorldBounds& bounds,
     const std::array<float, 16>& world_to_clip) noexcept;
-NativeWorldLighting shadow_projection_lighting(const NativeWorldLighting& lighting) noexcept;
 // Unions static receiver boxes per square world cell (terrain-sector sized),
 // appending one box per occupied cell in stable cell order. Coverage clips every
 // receiver against the camera and each map, so the count is what it pays for.
