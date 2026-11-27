@@ -2052,6 +2052,7 @@ namespace {
 struct BaseCompanion {
     int id;
     std::string key;
+    std::string remainderKey;
 };
 
 const std::array<BaseCompanion, N_MAX_MERC_NUMBER> &BaseCompanions()
@@ -2064,6 +2065,7 @@ const std::array<BaseCompanion, N_MAX_MERC_NUMBER> &BaseCompanions()
             name.Format("merc%d", i + 1);
             list[i].id = GetPersonageIDByName(name);
             list[i].key = std::string("dejavu.base_xp.") + name.GetString();
+            list[i].remainderKey = list[i].key + ".fifths";
         }
         return list;
     }();
@@ -2084,24 +2086,46 @@ bool IsBaseCompanion(int id)
     return false;
 }
 
-bool ApplyBaseExperience(CPlayer &player, const BaseCompanion &companion, SRPGUnitStats &stats, float earned)
+// Both entries use the existing server-owned save map. The original entry also
+// accepts fractional XP from older saves. The remainder is in fifths of an XP:
+// five one-point hero rewards then add up exactly, even for a veteran NPC.
+void CreditCompanion(CPlayer &player, const BaseCompanion &companion, float heroShare,
+                     CUnitServer *unit, SRPGUnitStats *fallback = nullptr)
 {
-    auto &balances = player.party.vars;
-    auto pending = balances.find(companion.key);
-    if (pending != balances.end())
-        earned += pending->second;
-    if (earned <= 0)
-        return false;
-    stats.GainExperience(earned, false);
-    if (pending != balances.end())
-        balances.erase(pending);
-    return true;
-}
-
-void ApplyBaseExperience(CPlayer &player, const BaseCompanion &companion, CUnitServer &server, float earned = 0)
-{
-    if (ApplyBaseExperience(player, companion, *server.GetRPGStats(), earned))
-        server.RecalcRPGStats();
+    auto &vars = player.party.vars;
+    auto read = [&](const std::string &key) {
+        const auto it = vars.find(key);
+        return it == vars.end() ? 0.0f : it->second;
+    };
+    auto store = [&](const std::string &key, float oldValue, float value) {
+        if (oldValue != value)
+        {
+            if (value == 0)
+                vars.erase(key);
+            else
+                vars[key] = value;
+        }
+    };
+    const float whole = read(companion.key);
+    const float remainder = read(companion.remainderKey);
+    double fifths = double(whole) * 5 + remainder + heroShare;
+    auto *stats = unit ? unit->GetRPGStats() : fallback;
+    if (stats && fifths > 0)
+    {
+        // On arrival or hire, settle all representable XP. During a stream of
+        // awards, only run the full RPG recalculation once a whole point is due.
+        const double due = heroShare == 0 ? fifths / 5 : std::floor(fifths / 5);
+        if (due > 0)
+        {
+            const float oldXP = stats->fpExperience, oldPenalty = stats->fExpPenalty;
+            fifths -= stats->GainExperience(float(due), false) * 5;
+            if (unit && (oldXP != stats->fpExperience || oldPenalty != stats->fExpPenalty))
+                unit->RecalcRPGStats();
+        }
+    }
+    const float newWhole = float(std::trunc(fifths / 5));
+    store(companion.key, whole, newWhole);
+    store(companion.remainderKey, remainder, float(fifths - double(newWhole) * 5));
 }
 }
 
@@ -2160,7 +2184,6 @@ void CWorldServer::CreditBaseCompanions(CPlayer &player, float heroShare)
 {
     if (!(heroShare > 0) || !std::isfinite(heroShare) || !BaseCompanionExperienceActive(*this))
         return;
-    const float earned = heroShare * 0.2f;
     const auto &companions = BaseCompanions();
     for (int merc = 1; merc <= N_MAX_MERC_NUMBER; ++merc)
     {
@@ -2169,11 +2192,8 @@ void CWorldServer::CreditBaseCompanions(CPlayer &player, float heroShare)
             continue;
         auto *unit = curInterface == IFACE_BASE && szCurrentZoneName.CompareNoCase(pszLocalMercZone[merc - 1]) == 0
             ? GetUnit(companion.id) : nullptr;
-        if (unit && !unit->IsDead())
-            ApplyBaseExperience(player, companion, *static_cast<CUnitServer *>(unit->GetUnitSpecific()), earned);
-        else
-            // Private server balance, serialized with the party. No UI or script event is needed.
-            player.party.vars[companion.key] += earned;
+        auto *server = unit && !unit->IsDead() ? static_cast<CUnitServer *>(unit->GetUnitSpecific()) : nullptr;
+        CreditCompanion(player, companion, heroShare, server);
     }
 }
 
@@ -2263,7 +2283,7 @@ void CWorldServer::RecalcMercBriefings()
             {
                 if (bIsNativeZone && curInterface == IFACE_BASE && BaseCompanionExperienceActive(*this))
                     if (auto *unit = GetUnit(nID); unit && !unit->IsDead())
-                        ApplyBaseExperience(*pPlayer, BaseCompanions()[nMerc - 1], *static_cast<CUnitServer *>(unit->GetUnitSpecific()));
+                        CreditCompanion(*pPlayer, BaseCompanions()[nMerc - 1], 0, static_cast<CUnitServer *>(unit->GetUnitSpecific()));
                 // has not this merc in party
                 if (vars.GetVar(szGoodbye))
                 {
@@ -2376,7 +2396,7 @@ void CWorldServer::OnBriefingCompleteMercs(CPlayer *pPlayer, const char *pszBrie
                 if (BaseCompanionExperienceActive(*this))
                 {
                     auto &server = *static_cast<CUnitServer *>(pMerc->GetUnitSpecific());
-                    ApplyBaseExperience(*pPlayer, BaseCompanions()[nMerc - 1], server);
+                    CreditCompanion(*pPlayer, BaseCompanions()[nMerc - 1], 0, &server);
                     member.stats.fpExperience = server.GetRPGStats()->fpExperience;
                     member.stats.fExpPenalty = server.GetRPGStats()->fExpPenalty;
                 }
@@ -2386,7 +2406,7 @@ void CWorldServer::OnBriefingCompleteMercs(CPlayer *pPlayer, const char *pszBrie
                 ASSERT(0);
                 auto &member = pPlayer->party.CreatePersonage(szMercName, "Human Hero", "");
                 if (BaseCompanionExperienceActive(*this))
-                    ApplyBaseExperience(*pPlayer, BaseCompanions()[nMerc - 1], member.stats, 0);
+                    CreditCompanion(*pPlayer, BaseCompanions()[nMerc - 1], 0, nullptr, &member.stats);
             }
         }
     }

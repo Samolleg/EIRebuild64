@@ -898,21 +898,28 @@ void SRPGUnitStats::AddExperience(float fExp)
 }
 // gain experience and recalc it to character points.
 // also, recalc all stats
-void SRPGUnitStats::GainExperience(float fpGainedExperience, bool useIntelligence)
+double SRPGUnitStats::GainExperience(float fpGainedExperience, bool useIntelligence)
 {
-    if (auto* mod = ModRuntime::Current())
+    const auto *mod = ModRuntime::Current();
+    float limit = mod ? mod->ExperienceLimit() : -1.0f;
+    if (limit >= 0)
     {
-        const float limit = mod->ExperienceLimit();
-        if (limit >= 0.0f)
-        {
-            // ExpLimitCheck uses the original intelligence multiplier for the award and cap.
-            const float multiplier = float(pow(1.04, psIntelligence.fpEffectiveValue - 25.0f));
-            AddExperience(useIntelligence ? fpGainedExperience * multiplier : fpGainedExperience);
-            fpExperience = Min(fpExperience, limit * multiplier);
-            return;
-        }
+        const float multiplier = float(pow(1.04, psIntelligence.fpEffectiveValue - 25.0f));
+        limit *= multiplier;
+        if (useIntelligence)
+            fpGainedExperience *= multiplier;
     }
-    AddExperience(useIntelligence ? fpGainedExperience * GetExpMultiplier() : fpGainedExperience);
+    else if (useIntelligence)
+        fpGainedExperience *= GetExpMultiplier();
+
+    // Return the native increment before the cap so a deferred balance retains
+    // rounding error, but never banks XP rejected by the campaign limit.
+    const double before = double(fpExperience) + fExpPenalty;
+    AddExperience(fpGainedExperience);
+    const double increment = (double(fpExperience) + fExpPenalty) - before;
+    if (limit >= 0)
+        fpExperience = Min(fpExperience, limit);
+    return increment;
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void SRPGUnitStats::GainExperienceInCombat(CUnit *pUnit, float fpGainedExperience)

@@ -397,7 +397,7 @@ public:
     float GetPercept(int nIndex) const { return percepts[nIndex].fpEffectiveValue; }
     //
     float GetRealExp() const { return fpExperience + fExpPenalty; }
-    void GainExperience(float fpGainedExperience, bool useIntelligence = true);
+    double GainExperience(float fpGainedExperience, bool useIntelligence = true);
     void GainExperienceInCombat(CUnit *pUnit, float fpGainedExperience);
     void AddExperience(float fAddExp);
     void AddExpPenalty(float fPenalty);
