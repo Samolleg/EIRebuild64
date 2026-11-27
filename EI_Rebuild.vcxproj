@@ -351,6 +351,9 @@
     <ClCompile Include="Game\ModFinalGolemVisual.cpp" />
     <ClCompile Include="Game\WorldInterface.cpp" />
     <ClCompile Include="Game\WorldServer.cpp" />
+    <ClCompile Include="Game\GameplayOnly\*.cpp">
+      <ObjectFileName>$(IntDir)GameplayOnly_%(Filename).obj</ObjectFileName>
+    </ClCompile>
     <ClCompile Include="Game\ZoneExit.cpp" />
     <ClCompile Include="shared\Common.cpp" />
     <ClCompile Include="Game\PhysicsFxPhysX.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>

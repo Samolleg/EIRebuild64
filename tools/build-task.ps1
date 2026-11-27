@@ -53,11 +53,16 @@ function Get-KitInputIdentity {
         '--sdk',$sdk,'--sdk-version',$sdkversion,'--assets',$RendererAssetsSource,
         '--materials',$RendererMaterialsSource,'--pwsh',(Join-Path $PSHOME 'pwsh.exe'),'--cache',$CacheRoot)
     if ($ShaderResourceManifest) { $options += '--manifest',$ShaderResourceManifest }
+    if (!$CheckKitReuse) {
+        [IO.File]::Delete($bakerKeyPath)
+        $options += '--baker-key',$bakerKeyPath
+    }
     $mode = if ($CheckKitReuse) { '--check-external' } else { '--save-external' }
     $identity = & $python -B (Join-Path $PSScriptRoot 'kit-inputs.py') @options $mode (Join-Path $task 'build-kit-external.json')
     if ($LASTEXITCODE -eq 0 -and $identity -cmatch '^[a-f0-9]{64}$') { return $identity }
 }
 $sourceRepo = $repo
+$bakerKeyPath = Join-Path $task 'navbake-inputs.sha256'
 $receiptPath = Join-Path $task 'build-kit-receipt.json'
 if ($CheckKitReuse) {
     if (![IO.File]::Exists($receiptPath)) { exit 3 }
@@ -237,7 +242,44 @@ try {
     # are not dependencies and must not scan the entire Windows SDK.
     $sourceCommit = (& git -C $sourceRepo -c "safe.directory=$sourceRepo" describe --always --abbrev=12 --dirty --exclude=*).Trim()
     if ($LASTEXITCODE -ne 0 -or !$sourceCommit) { throw 'Cannot identify source commit.' }
-    $arguments = @("/p:ScriptCheckCommit=$sourceCommit",'EI_Rebuild.sln',"/m:$cores",'/nr:false','/t:Build','/p:Configuration=Release','/p:Platform=x64','/p:PreferredToolArchitecture=x64',"/p:VCToolsVersion=$vcversion","/p:WindowsTargetPlatformVersion=$sdkversion","/p:UserRootDir=$privateTemp\",'/nologo','/v:minimal')
+    $solution = 'EI_Rebuild.sln'
+    $bakerWork = Join-Path $repo 'out/x64/Release/EIRebuild64NavBake'
+    $bakerSource = $bakerWork
+    $bakerHit = $false
+    $bakerKey = if ($inputIdentity) { [IO.File]::ReadAllText($bakerKeyPath) }
+    if ($bakerKey) {
+        foreach ($folder in @((Join-Path $project 'builds/rebuild64/current'),$bakerWork)) {
+            $record = Join-Path $folder 'NavBake.inputs.json'
+            if (![IO.File]::Exists($record)) { continue }
+            $savedBaker = Get-Content -Raw -LiteralPath $record | ConvertFrom-Json
+            if ($savedBaker.key -cne $bakerKey) { continue }
+            $exe = Join-Path $folder 'EIRebuild64NavBake.exe'
+            $pdb = Join-Path $folder 'EIRebuild64NavBake.pdb'
+            if (![IO.File]::Exists($exe) -or ![IO.File]::Exists($pdb) -or
+                (Hash-File $exe) -cne $savedBaker.exe -or (Hash-File $pdb) -cne $savedBaker.pdb) { continue }
+            $bakerSource = $folder
+            $bakerHit = $true
+            break
+        }
+    }
+    if ($bakerHit) {
+        # Filter the real solution, preserving its configuration and dependencies.
+        $projects = @(foreach ($line in [IO.File]::ReadLines((Join-Path $repo $solution))) {
+            if ($line -match '^Project\("[^"]+"\) = "[^"]+", "([^"]+\.vcxproj)",' -and
+                $Matches[1] -ne 'EIRebuild64NavBake.vcxproj') { $Matches[1] }
+        })
+        if (!$projects.Count) { throw 'No build projects found in the solution.' }
+        $filter = Join-Path $privateTemp 'game.slnf'
+        [IO.File]::WriteAllText($filter, (@{solution=@{path=(Join-Path $repo $solution);projects=$projects}} | ConvertTo-Json -Depth 4))
+        $solution = $filter
+        Write-Host "NavBake: reuse verified EXE and PDB from $bakerSource; project skipped."
+    } else {
+        # A changed input also invalidates the link when a former object was removed.
+        if ([IO.Directory]::Exists($bakerWork)) { [IO.File]::Delete((Join-Path $bakerWork 'NavBake.inputs.json')) }
+        if ([IO.Directory]::Exists($bakerWork)) { [IO.File]::Delete((Join-Path $bakerWork 'EIRebuild64NavBake.exe')) }
+        Write-Host 'NavBake: build offline project.'
+    }
+    $arguments = @("/p:ScriptCheckCommit=$sourceCommit",$solution,"/m:$cores",'/nr:false','/t:Build','/p:Configuration=Release','/p:Platform=x64','/p:PreferredToolArchitecture=x64',"/p:VCToolsVersion=$vcversion","/p:WindowsTargetPlatformVersion=$sdkversion","/p:UserRootDir=$privateTemp\",'/nologo','/v:minimal')
     if ($shaderReuse) {
         $reuseFolder = Split-Path -Parent $ShaderResourceManifest
         $destination = Join-Path $repo 'out/x64/Release/RendererShaders'
@@ -290,7 +332,7 @@ try {
     }
     if ($PhysicsFxCheck) {
         # Keep the shared work tree locked through this dependent native check build.
-        $checkArgs = @($arguments | Where-Object { $_ -notlike '*.sln' -and $_ -notlike '/flp:*' })
+        $checkArgs = @($arguments | Where-Object { $_ -notlike '*.sln' -and $_ -notlike '*.slnf' -and $_ -notlike '/flp:*' })
         $checkArgs = @($checkArgs | Where-Object { $_ -notlike '/t:*' })
         & (Join-Path $PSScriptRoot 'invoke-build.ps1') $msbuild (Join-Path $repo 'PhysicsFxRenderCheck.vcxproj') @checkArgs /p:BuildProjectReferences=false *> (Join-Path $task 'physics-render-build.txt')
         if ($LASTEXITCODE -ne 0) { throw 'Physics render check build failed.' }
@@ -304,8 +346,9 @@ try {
     if (Test-Path -LiteralPath $kit) { throw "Kit already exists: $kit; retain evidence and use a fresh task for timing." }
     New-Item -ItemType Directory -Path $kit | Out-Null
     foreach ($target in @(@('EI_Rebuild','EIRebuild64'),@('EIRebuild64NavBake','EIRebuild64NavBake'),@('EIRebuild64Pack','EIRebuild64Pack'),@('EIRebuild64ModelCheck','EIRebuild64ModelCheck'))) {
-        Copy-Item -LiteralPath (Join-Path $repo "out/x64/Release/$($target[0])/$($target[1]).exe") -Destination $kit
-        Copy-Item -LiteralPath (Join-Path $repo "out/x64/Release/$($target[0])/$($target[0]).pdb") -Destination (Join-Path $kit ($target[1] + '.pdb'))
+        $folder = if ($target[0] -eq 'EIRebuild64NavBake') { $bakerSource } else { Join-Path $repo "out/x64/Release/$($target[0])" }
+        Copy-Item -LiteralPath (Join-Path $folder ($target[1]+'.exe')) -Destination $kit
+        Copy-Item -LiteralPath (Join-Path $folder ($target[0]+'.pdb')) -Destination (Join-Path $kit ($target[1] + '.pdb'))
     }
     Copy-Item -LiteralPath (Join-Path $repo 'out/x64/Release/EI_Rebuild/EI.RenderResources.dll') -Destination $kit
     Copy-Item -LiteralPath (Join-Path $repo 'out/x64/Release/RenderModule/EI.Renderer.dll') -Destination $kit
@@ -354,13 +397,21 @@ try {
             }
         }
     }
+    $finalIdentity = Get-KitInputIdentity
+    $finalBakerKey = if ($finalIdentity) { [IO.File]::ReadAllText($bakerKeyPath) }
+    if ($bakerHit -and $finalBakerKey -cne $bakerKey) { throw 'NavBake inputs changed during reuse.' }
+    if ($finalBakerKey) {
+        $record = @{key=$finalBakerKey;exe=(Hash-File (Join-Path $kit 'EIRebuild64NavBake.exe'));pdb=(Hash-File (Join-Path $kit 'EIRebuild64NavBake.pdb'))} | ConvertTo-Json -Compress
+        Write-Utf8 (Join-Path $kit 'NavBake.inputs.json') $record
+        if (!$bakerHit) { Write-Utf8 (Join-Path $bakerWork 'NavBake.inputs.json') $record }
+    }
     Write-Utf8 (Join-Path $kit 'SHA256SUMS') (Manifest $kit)
     if ($PhysicsFxCheck) {
         & (Join-Path $repo 'tools/check-physics-fx-render.ps1') -OutputDirectory (Join-Path $task 'checks/render') -Prepared -SkipBuild -KitDirectory $kit
     }
     $clock.Stop()
     Write-Utf8 (Join-Path $task 'build-result.txt') @("Seconds=$($clock.Elapsed.TotalSeconds)","MSBuildWorkers=$cores","CacheBytes=$bytes","CacheRoot=$CacheRoot")
-    if ($inputIdentity -and $inputIdentity -ceq (Get-KitInputIdentity)) {
+    if ($inputIdentity -and $inputIdentity -ceq $finalIdentity) {
         $receipt = @{version=1; inputs=$inputIdentity; manifest=(Hash-File (Join-Path $kit 'SHA256SUMS')); shaderManifest=$ShaderResourceManifest}
         $tempReceipt = $receiptPath + '.tmp'
         [IO.File]::WriteAllText($tempReceipt, ($receipt | ConvertTo-Json -Compress))
