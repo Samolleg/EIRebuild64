@@ -2643,11 +2643,11 @@ ShadowInputDecision decide_owned_shadow_input(RetainedStaticScene& scene,
     const RetainedShadowInputDomain* cached,const RetainedShadowSourceChanges& changes,
     const RetainedVisualFrame& values,const std::array<float,16>& world_to_clip,
     const NativeWorldLighting& lighting,std::uint32_t flags,bool draw_undetected,
-    bool terrain_enabled,std::uint64_t source_revision,std::optional<float> camera_anchor_z) {
+    bool terrain_enabled,std::uint64_t source_revision) {
     observe_shadow_reuse_inputs(cached,changes,world_to_clip,lighting,flags,draw_undetected,terrain_enabled,source_revision);
     const auto note=[](ShadowInputDifference cause){++g_shadow_reuse_inputs.counts[static_cast<unsigned>(cause)];};
     ShadowInputDecision result;
-    if(!cached || cached->world_to_clip!=world_to_clip || cached->camera_anchor_z!=camera_anchor_z ||
+    if(!cached || cached->world_to_clip!=world_to_clip ||
        !same_shadow_depth_lighting(cached->lighting,lighting) ||
        cached->class_flags!=flags || cached->draw_undetected!=draw_undetected ||
        !reusable_shadow_terrain(*cached,terrain_enabled,false) || changes.full ||
@@ -2747,11 +2747,9 @@ bool prepare_owned_world_shadows_from(OwnedShadowInputs in,
             report_world_point_light_omission("world_point_light.sink_missing");
         }
         point_lighting_timing.finish();
-        const auto camera_anchor_z=std::isfinite(frame.camera_anchor_z)?
-            std::optional<float>(frame.camera_anchor_z):std::nullopt;
         auto decision=decide_owned_shadow_input(shadow_scene,cached.get(),changes,*values,
             world_to_clip,shadow_lighting,flags,draw_undetected,
-            terrain_enabled,shadow_source_revision,camera_anchor_z);
+            terrain_enabled,shadow_source_revision);
         decision_timing.finish();
         if(decision.route==ShadowInputRoute::reuse) {
             if(owned_shadow_current_revision(shadow_scene)==cached->source_revision) {
@@ -2819,7 +2817,6 @@ bool prepare_owned_world_shadows_from(OwnedShadowInputs in,
                 auto next=std::make_shared<RetainedShadowInputDomain>();
                 next->source_revision=shadow_source_revision;
                 next->world_to_clip=world_to_clip;
-                next->camera_anchor_z=camera_anchor_z;
                 next->lighting=shadow_lighting;
                 next->class_flags=flags;
                 next->draw_undetected=draw_undetected;

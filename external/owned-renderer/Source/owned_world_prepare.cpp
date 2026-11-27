@@ -263,13 +263,11 @@ bool prepare_owned_visual_values(std::shared_ptr<const RetainedVisualFrame> valu
     auto prepared_storage=std::move(frame.prepared);
     if(prepared_storage.empty())prepared_storage.swap(g_owned_visual_prepared_spare);
     const auto shadow_source_diagnostic=frame.shadow_source_diagnostic;
-    const float camera_anchor_z=frame.camera_anchor_z;
     auto shadow_storage=std::move(frame.shadows);
     clear_owned_visual_world_frame(frame);   // the scratch vectors keep their capacity
     if(!values)return false;
     frame.prepared=std::move(prepared_storage);
     frame.shadow_source_diagnostic=shadow_source_diagnostic;
-    frame.camera_anchor_z=camera_anchor_z;
     frame.shadows=std::move(shadow_storage);
     frame.active = true;
     frame.shadows_enabled = shadows_enabled;
