@@ -801,6 +801,7 @@ json UnitDetail(CUnit* unit,CWorldServer& world,CPlayer* player) {
     auto* specific=unit->GetUnitSpecific();
     if(!specific||specific->WhoAmI()!=HPC_UNITSERVERSPECIFIC)return result;
     auto& server=*static_cast<CUnitServer*>(specific);
+    result["perception"] = {{"visibility", server.GetVisionDetect()}, {"footstep_audibility", server.GetFSSoundDetect()}};
     const auto& path=LiveSnapshotAccess::Path(server);
     auto* target=server.logic.GetCurrentTarget();
     const auto& command=server.GetScriptCommand();

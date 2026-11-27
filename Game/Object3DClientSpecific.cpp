@@ -1115,7 +1115,7 @@ bool CObject3DClientSpecific::PrepareOwnedResources(bool publishAppearance)
             }
             if (!pairedTransfer && horse && horse->IsMoving() && horse->GetMaskName() &&
                 _stricmp(horse->GetMaskName(), "unanhoho") == 0) {
-                const bool gallop = (held ? rider : horse)->GetShowPose() == UP_RUN;
+                const bool gallop = (held ? rider->GetShowPose() : horse->GetCurrentPose()) == UP_RUN;
                 const auto gait = base->clip_lengths.find(gallop ? "crun" : "cwalk");
                 if (gait != base->clip_lengths.end()) {
                     const auto position = object->GetCP();

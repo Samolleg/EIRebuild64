@@ -1018,13 +1018,17 @@ EUnitCastFailure CUnit::CheckIsWandPossible(DWORD dwQItemIndex, CPlot3D &ptTarge
 /////////////////////////////////////////////////////////////////////////////////////
 CUnit* CUnit::MountedRider()
 {
-    auto* rider=ridingPassenger>=0 && GetWorld() ? GetWorld()->GetUnit(ridingPassenger) : nullptr;
-    return rider && rider->ridingHorse==GetID() ? rider : nullptr;
+    if (ridingPassenger < 0) return nullptr;
+    auto* world = GetWorldBase();
+    auto* rider = world ? world->GetUnit(ridingPassenger) : nullptr;
+    return rider && rider->ridingHorse == GetID() ? rider : nullptr;
 }
 CUnit* CUnit::RiddenMount()
 {
-    auto* horse=ridingHorse>=0 && GetWorld() ? GetWorld()->GetUnit(ridingHorse) : nullptr;
-    return horse && horse->ridingPassenger==GetID() ? horse : nullptr;
+    if (ridingHorse < 0) return nullptr;
+    auto* world = GetWorldBase();
+    auto* horse = world ? world->GetUnit(ridingHorse) : nullptr;
+    return horse && horse->ridingPassenger == GetID() ? horse : nullptr;
 }
 void CUnit::GetSpeeds(float &fpMoveSpeed, float &fpRotateSpeed)
 {
