@@ -295,7 +295,7 @@ SAIMark *CAIMarkManager::AddFootStep(const CPlot3D &pos, CUnitServer *pUnitServe
     auto* rider = pUnitServer->GetUnit()->MountedRider();
     auto* source = rider ? static_cast<CUnitServer*>(rider->GetUnitSpecific()) : pUnitServer;
     ProduceSoundFootstep(source, pUnitServer->GetFSSoundDetect() * footstepTile.fpFootstepStrengths[2],
-                         0, &pos);
+                         AI_HEAR_FOOTSTEP_DELAY, &pos);
     return 0; // CRAP now we have no footsteps
     /*
             CUnit *pUnit = pUnitServer->GetUnit();

@@ -5170,7 +5170,7 @@ int CUnitServer::Segment()
         }
 #endif // __DEMO__
        //
-        CreateFootstep();
+        if (!lpUnit->RiddenMount()) CreateFootstep();
         UseContinousSpells();
         // CRAP перерасчет заметности объекта
         if (lpUnit->IsHero()) //>CheckFlag( UNIT_RECALC_DETECT ) )

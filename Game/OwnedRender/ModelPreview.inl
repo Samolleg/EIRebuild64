@@ -167,6 +167,15 @@ BOOL CObject3DClientSpecific::DrawModelPreview(CRenderer* renderer) try
             owned::NativeGeometryView view{};
             if (!owned::prepare_model_preview_geometry(sample, i, *pose, objectToWorld,
                     worldToClip, textureTime, fog, ownedPreviewSerial, view)) return reject("preview.native_geometry");
+            // Native models already carry skinned, object-local vertices. Present those
+            // vertices directly in HUD space, as inventory GLBs do. World LOD and
+            // world camera culling do not describe a model inside a panel.
+            view.world = {};
+            view.lod_figure = nullptr;
+            view.prepared_identity = {};
+            view.prepared_mesh = nullptr;
+            view.geometry_revision_valid = false;
+            view.object_to_clip = owned::retained_multiply_matrix(worldToClip, objectToWorld);
             view.interface_preview = true;
             view.flags &= ~owned::native_ground_contact_flag;
             view.fog = fog;
