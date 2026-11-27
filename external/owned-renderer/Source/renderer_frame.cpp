@@ -2161,6 +2161,19 @@ HRESULT Renderer::present_frame_d3d12(const ScenePresentInputs* inputs){
    GetFileAttributesA(marker)!=INVALID_FILE_ATTRIBUTES;
  const bool f11_capture=debug_overlay_.consume_capture_request()||take_core_capture()||(requested&&!previous_request);
  previous_request=requested;
+ if(shadow_temporal_diagnostic_enabled()&&profiler_.shadow_temporal_armed()&&world_d3d12_&&shadow12_.maps&&
+    profiler_.shadow_temporal_due(presentation_frame_index_,presentation_frame_index_)){
+  ShadowTemporalFrameSnapshot s{};
+  s.presentation_frame=presentation_frame_index_;s.world_completion_serial=presentation_frame_index_;
+  s.sample_qpc=perf_now();s.world_to_clip=native_world_clip_;s.world_to_clip_valid=native_world_clip_valid_;
+  s.authored_sun_direction=native_world_lighting_.sunlight_direction;s.authored_sun_valid=native_world_lighting_valid_;
+  for(unsigned i=0;i<5;++i){
+   const auto& from=native_shadow_frame_.slices[i];auto& to=s.slices[i];
+   to.enabled=from.enabled;to.valid=native_shadow_valid_[i];to.world_to_light=from.world_to_light;
+   to.camera_slice=from.camera_slice;to.bias=from.bias;
+  }
+  profiler_.queue_shadow_temporal_frame_d3d12(*world_d3d12_,*shadow12_.maps,s);
+ }
  bool recorder_armed_this_present=false;
  const auto temporal_outcome=profiler_.shadow_temporal_present(presentation_frame_index_);
  if(harness_shadow_temporal_outcome_==ShadowTemporalPresentOutcome::waiting&&
@@ -2181,7 +2194,7 @@ HRESULT Renderer::present_frame_d3d12(const ScenePresentInputs* inputs){
   const bool armed=world_d3d12_&&shadow12_.maps&&
    d3d12_->texture_info(*shadow12_.maps,sw,sh,levels,format)&&
    profiler_.request_shadow_temporal_pair_d3d12(*d3d12_,*world_d3d12_,*shadow12_.maps,sw,
-    presentation_frame_index_+1,bridge_world_draw_completion_counter());
+    presentation_frame_index_+1,presentation_frame_index_);
   if(harness_request==HarnessRequest::capture)
    harness_shadow_temporal_outcome_=armed?ShadowTemporalPresentOutcome::waiting:ShadowTemporalPresentOutcome::unavailable;
   report_placed_hitch_lifecycle(armed?"shadow_temporal_capture_armed":"shadow_temporal_capture_rejected",
