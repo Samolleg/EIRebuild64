@@ -8198,9 +8198,7 @@ HRESULT Renderer::flush_native_shadows_d3d12(){
       state.render[D3DRENDERSTATE_ALPHAFUNC]=D3DCMP_GREATER;state.render[D3DRENDERSTATE_ALPHAREF]=64; // alpha > 0.25
      }
      Constants constants{};constants.native_triangle_base=batch.output_triangle_base;
-     const bool sun_branch=!point&&!rain&&slice<3&&native_shadow_frame_.matching_current_sun&&
-        batch.foliage&&bucket.opacity==NativeOpacityClass::cutout;
-     constants.layout_origin[2]=(shelter_foliage||sun_branch)?1.f:0.f;
+     constants.layout_origin[2]=shelter_foliage?1.f:0.f;
      constants.textured=state.render[D3DRENDERSTATE_ALPHATESTENABLE]&&(bucket.texture_srv||bucket.texture_d3d12)?1u:0u;
      constants.alpha_test=state.render[D3DRENDERSTATE_ALPHATESTENABLE]!=0;constants.alpha_func=state.render[D3DRENDERSTATE_ALPHAFUNC];
      constants.alpha_ref=(state.render[D3DRENDERSTATE_ALPHAREF]&255)/256.f;
