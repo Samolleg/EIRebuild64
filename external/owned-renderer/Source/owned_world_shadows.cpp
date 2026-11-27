@@ -1775,20 +1775,6 @@ bool execute_owned_shadow_pass(bool terrain_enabled,
             if(!build_retained_shadow_frame(frame.coverage,casters,shadows,statics))throw "owned_shadow_projection";
             shadows.world_epoch=bridge_current_world_epoch();
             shadows.matching_current_sun=frame.matching_current_sun;
-            if(frame.matching_current_sun && frame.coverage.map_side && shadows.slices[2].enabled) {
-                const auto& m=shadows.slices[2].world_to_light;
-                const auto& old=frame.phase_reference.world_to_light[2];
-                const auto at=[](const auto& a,int i) {
-                    return a[i]*348.0712+a[i+1]*264.5187+a[i+2]*8.602+a[i+3];
-                };
-                char detail[640];
-                std::snprintf(detail,sizeof(detail),"side=%u prevside=%u valid=%u x=%.6f y=%.6f oldx=%.6f oldy=%.6f tex=%.8f sun=%.8f,%.8f,%.8f",
-                    frame.coverage.map_side,frame.phase_reference.side,unsigned(frame.phase_reference.valid_mask),
-                    at(m,0)*.5*frame.coverage.map_side,at(m,4)*.5*frame.coverage.map_side,
-                    at(old,0)*.5*frame.phase_reference.side,at(old,4)*.5*frame.phase_reference.side,
-                    shadows.slices[2].bias[0],m[8],m[9],m[10]);
-                bridge_report_event("shadow_phase_probe",detail);
-            }
         }
         CityRetainedOwnerGuard registration_timing(CityRetainedOwner::depth_registration);
         std::uint8_t dirty=0;
