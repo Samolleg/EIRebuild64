@@ -1755,47 +1755,24 @@ void text_megabytes(std::uint64_t bytes) {
     ImGui::TextDisabled(ui_text(value < 10.0 ? "%.1f MB" : "%.0f MB"), value);
 }
 
-// The process memory line beside the video memory: the 32-bit game's
-// address space in use and its largest free block (what large maps run out
-// of), and the 64-bit render host's private memory when one runs. Sampled at
-// most once a second while drawn. Core mode draws this on the host: the game
-// process sends its address space through the control block
-// (debug_overlay_set_game_address_space); the host reads its own process.
+// EIRebuild64 embeds the renderer. WorkingSetSize counts resident pages of
+// this process; the virtual address span also contains large driver reservations.
 void draw_process_memory() {
-    struct Sample {
-        ULONGLONG at_ms = 0;
-        std::uint64_t game_used_mb = 0, game_free_mb = 0, host_private_bytes = 0;
-    };
-    static Sample sample;
-    const ULONGLONG now = GetTickCount64();
-    if (!sample.at_ms || now - sample.at_ms >= 1000) {
-        sample = {};
-        sample.at_ms = now;
-        if (g_running_core) {
-            sample.game_used_mb = g_core_game_va_used_mb.load(std::memory_order_relaxed);
-            sample.game_free_mb = g_core_game_va_free_mb.load(std::memory_order_relaxed);
-            PROCESS_MEMORY_COUNTERS_EX counters{};
-            counters.cb = sizeof(counters);
-            if (GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&counters),
-                                     sizeof(counters)))
-                sample.host_private_bytes = counters.PrivateUsage;
-        } else {
-            address_space_mb(sample.game_used_mb, sample.game_free_mb, true);
-            sample.host_private_bytes = x64remote::host_private_bytes();
-        }
+    static ULONGLONG sampled_at = 0;
+    static SIZE_T working_set = 0;
+    static bool valid = false;
+    const auto now = GetTickCount64();
+    if (!sampled_at || now - sampled_at >= 1000) {
+        PROCESS_MEMORY_COUNTERS counters{};
+        valid = GetProcessMemoryInfo(GetCurrentProcess(), &counters, sizeof(counters)) != FALSE;
+        working_set = counters.WorkingSetSize;
+        sampled_at = now;
     }
-    if (sample.game_used_mb)
-        ImGui::Text(ui_text("Game address space: %.0f MB used, largest free block %.0f MB"),
-                    static_cast<double>(sample.game_used_mb), static_cast<double>(sample.game_free_mb));
+    if (valid)
+        ImGui::Text(ui_text("Game RAM (working set): %.0f MiB"), mib(working_set));
     else
-        ImGui::TextUnformatted(ui_text("Game address space: n/a"));
-    ImGui::SetItemTooltip(ui_text("The 32-bit game can address at most 4 GB (2 GB without 4 GB mode). "
-                          "When the largest free block gets small, large maps can run out of memory."));
-    if (sample.host_private_bytes) {
-        ImGui::Text(ui_text("Render host memory: %.0f MB"), mib(sample.host_private_bytes));
-        ImGui::SetItemTooltip(ui_text("Private memory of the 64-bit render host process, which holds the graphics driver "
-                              "and the renderer's own data outside the game's address space."));
-    }
+        ImGui::TextUnformatted(ui_text("Game RAM: unavailable"));
+    ImGui::SetItemTooltip(ui_text("Physical memory currently resident for the game process, including shared pages."));
 }
 
 // "Video memory: X MB used of Y MB available" and the
@@ -2245,7 +2222,10 @@ void draw_settings_window(DebugOverlay::Implementation& state, RendererConfig& c
             configured_value(config, "window_width") != state.running_display[1] ||
             configured_value(config, "window_height") != state.running_display[2])
             ImGui::TextDisabled(ui_text("Display changes are pending. Use Apply display beside Window size."));
-        state.settings_filter.Draw(ui_text("Search options"),-1.f);
+        ImGui::SetNextItemWidth(-1.f);
+        if (ImGui::InputTextWithHint("##settings_filter", ui_text("Search options"),
+                                     state.settings_filter.InputBuf, sizeof(state.settings_filter.InputBuf)))
+            state.settings_filter.Build();
         const float footer=ImGui::GetFrameHeightWithSpacing()+ImGui::GetStyle().ItemSpacing.y;
         if(ImGui::BeginTabBar("option_tabs")) {
           for(unsigned tab=0;tab<2;++tab) {
