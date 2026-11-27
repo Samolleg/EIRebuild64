@@ -1059,7 +1059,7 @@ bool fit_shadow_camera_slice_xy(RetainedDirectionalSlice& slice,
     const ShadowFrustum& section,
     const std::array<std::array<float, 3>, 3>& light_axes,
     std::uint32_t map_side,const NativeShadowPhaseReference* previous=nullptr,unsigned index=5,
-    ShadowPoint* view_anchor=nullptr,const ShadowPoint* ground_anchor=nullptr) noexcept {
+    ShadowPoint* view_anchor=nullptr) noexcept {
     if (!slice.receivers_in_light.valid) return true;
     ShadowPoint near_center{}, far_center{}, delta{};
     for (unsigned axis = 0; axis < 3; ++axis) {
@@ -1096,10 +1096,9 @@ bool fit_shadow_camera_slice_xy(RetainedDirectionalSlice& slice,
     for (unsigned axis = 0; axis < 2; ++axis)
         for (unsigned component = 0; component < 3; ++component)
             light_center[axis] += double(light_axes[axis][component])*center[component];
-    const auto& phase_anchor=ground_anchor?*ground_anchor:center;
-    if(view_anchor)*view_anchor=phase_anchor;
+    if(view_anchor)*view_anchor=center;
     return finish_shadow_receiver_xy(slice, light_center,
-        std::sqrt(radius_squared),map_side,{previous,index,phase_anchor,&light_axes});
+        std::sqrt(radius_squared),map_side,{previous,index,center,&light_axes});
 }
 
 bool base_terrain_quality_anchor(const std::array<double,16>& camera_matrix,
@@ -1678,18 +1677,6 @@ bool build_retained_directional_coverage(
     ShadowPoint near_point{}, far_point{};
     if (!shadow_unproject(inverse, 0, 0, perspective ? 0 : minimum_depth, near_point) ||
         !shadow_unproject(inverse, 0, 0, perspective ? 1 : maximum_depth, far_point)) return false;
-    // The fitted sphere bounds the casters. Keep sampling phase at the viewed
-    // ground, where rotation about a distant slice centre moves thin silhouettes.
-    ShadowPoint ground{};
-    const ShadowPoint* ground_anchor=nullptr;
-    const double dz=far_point[2]-near_point[2];
-    if(previous_phase && std::isfinite(camera_anchor_z) && std::abs(dz)>1.e-9){
-        const double t=(double(camera_anchor_z)-near_point[2])/dz;
-        if(t>=0 && t<=1){
-            for(unsigned axis=0;axis<3;++axis)ground[axis]=near_point[axis]+t*(far_point[axis]-near_point[axis]);
-            ground_anchor=&ground;
-        }
-    }
     std::array<double, 5> depths{};
     depths.front() = perspective ? 0 : minimum_depth;
     depths.back() = maximum_depth;
@@ -1858,7 +1845,7 @@ bool build_retained_directional_coverage(
                     include_world_point(quality.receivers_in_light,projected);
                 }
                 ShadowPoint view_anchor{NAN,NAN,NAN};
-                if(!fit_shadow_camera_slice_xy(quality,section,result.light_axes,map_side,previous_phase,index,&view_anchor,ground_anchor)) return false;
+                if(!fit_shadow_camera_slice_xy(quality,section,result.light_axes,map_side,previous_phase,index,&view_anchor)) return false;
                 if(index>=first_active&&!have_view_anchor&&finite_value(view_anchor[0])&&finite_value(view_anchor[1])&&finite_value(view_anchor[2])){first_view_anchor=view_anchor;have_view_anchor=true;}
                 // Close cascades follow camera depth, so an approach can
                 // only advance from C2 to C1 to C0. The fitted light center
@@ -2026,7 +2013,7 @@ bool build_retained_directional_coverage(
         }
         if (perspective && index < 3) {
             ShadowPoint view_anchor{NAN,NAN,NAN};
-            if (!fit_shadow_camera_slice_xy(slice,section,result.light_axes,map_side,previous_phase,index,&view_anchor,ground_anchor)) return false;
+            if (!fit_shadow_camera_slice_xy(slice,section,result.light_axes,map_side,previous_phase,index,&view_anchor)) return false;
             if(index>=3u-close_cascades&&!have_view_anchor&&finite_value(view_anchor[0])&&finite_value(view_anchor[1])&&finite_value(view_anchor[2])){first_view_anchor=view_anchor;have_view_anchor=true;}
         } else if (!fit_shadow_receiver_xy(slice,map_side,0,{have_view_anchor?previous_phase:nullptr,index,first_view_anchor,&result.light_axes})) return false;
     }
