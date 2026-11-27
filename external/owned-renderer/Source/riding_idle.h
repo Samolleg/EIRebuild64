@@ -4,6 +4,15 @@
 #include <cstdint>
 
 namespace owned::gltf {
+inline const char* riding_clip_name(int transition) noexcept {
+    switch (transition) {
+        case 1: return "ride_mount_left";
+        case -1: return "ride_mount_right";
+        case 2: return "ride_dismount_left";
+        case -2: return "ride_dismount_right";
+        default: return "ride_seated";
+    }
+}
 struct RidingIdleChoice { unsigned variant=0; float time=0; };
 struct RidingIdleState {
     bool active=false, rider=false;

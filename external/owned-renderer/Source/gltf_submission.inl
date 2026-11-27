@@ -46,13 +46,7 @@ bool prepare_gltf_pose(const RetainedVisualSample &sample,
     unsigned clip = UINT32_MAX;
     const bool neutral = sample.selection.neutral;
     if (sample.riding) {
-        const char* name="ride_seated";
-        switch(sample.rideTransition) {
-            case 1: name="ride_mount_left"; break;
-            case -1: name="ride_mount_right"; break;
-            case 2: name="ride_dismount_left"; break;
-            case -2: name="ride_dismount_right"; break;
-        }
+        const char* name=gltf::riding_clip_name(sample.rideTransition);
         clip = gltf::named_clip(animation,name);
         gltf::animation_require(clip!=UINT32_MAX,"riding pose");
         request.flags=0x80180000u; request.frames=1;

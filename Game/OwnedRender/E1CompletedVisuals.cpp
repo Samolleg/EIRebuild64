@@ -121,7 +121,7 @@ bool completeVisualFrame(owned::RetainedVisualFrame& frame, bool combat) noexcep
                     const bool transition=actor->RidingTransition(theWorld.GetRenderTimeSegments());
                     const auto* mountedHorse=theWorldServer.GetUnit(horseId);
                     sample.riding_calm=!transition && mountedHorse && !mountedHorse->IsMoving() && !mountedHorse->IsDead();
-                    const float progress=std::clamp(float(dt/(exiting?CUnit::rideDismountTicks:CUnit::rideMountTicks)),0.f,1.f);
+                    const float progress=actor->RidingTransitionProgress(theWorld.GetRenderTimeSegments());
                     auto seat=it->object_pose.position;
                     if(transition) {
                         // The clip carries the pelvis from the near flank to
@@ -137,7 +137,7 @@ bool completeVisualFrame(owned::RetainedVisualFrame& frame, bool combat) noexcep
                             seat[2]+=edge*(sample.object_pose.position[2]-seat[2]-axis.z*actor->rideFlank*.76f);
                         }
                         sample.rideProgress=progress;
-                        sample.rideTransition=(exiting?2:1)*actor->rideFlank;
+                        sample.rideTransition=actor->RidingTransitionClip(theWorld.GetRenderTimeSegments());
                     } else seat[2]+=.55f;
                     sample.object_pose.position=seat;
                     sample.object_pose.quaternion=it->object_pose.quaternion;
