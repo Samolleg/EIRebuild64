@@ -1357,11 +1357,8 @@ void Renderer::begin_scene_renderer(){
   const std::array<float,2> sun_filter{configured_integer(config,"sun_shadow_correction",0)>=1?1.f:0.f,
    float(std::clamp(configured_integer(config,"sun_foliage_filter",kDefaultSunFoliageFilter),0,2))};
   if(sun_filter!=native_sun_filter_){native_sun_filter_=sun_filter;native_shadow_constants_dirty_=true;}
-  const bool early_out=configured_boolean(config,"shadow_early_out",true);
-  if(early_out!=native_shadow_early_out_){
-   native_shadow_early_out_=early_out;native_shadow_constants_dirty_=true;
-   if(!early_out)release_native_shadow_range();
-  }
+  // The early-out cells (shadowRange) are not on this backend: never current.
+  native_shadow_early_out_=false;native_shadow_range_mask_=0;
   if(far_foliage_opaque!=native_far_foliage_opaque_&&SUCCEEDED(flush_native())){
    native_far_foliage_opaque_=far_foliage_opaque;
    for(UINT slice=3;slice<5;++slice){native_shadow_valid_[slice]=false;native_shadow_static_valid_[slice]=false;}
