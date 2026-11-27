@@ -153,8 +153,7 @@ public:
         ownedBone.Publish(GetName(), data, size);
     }
     const OwnedRender::E1SelectedSkeletonBytes& GetOwnedBone() const noexcept { return ownedBone; }
-    void LoadBone(LPBYTE &lpData);
-    void LoadOldBone(LPBYTE &lpData);
+    bool LoadBone(const BYTE* data, DWORD size);
     // class identification functions
     virtual LPCSTR GetGameClassName() const { return "CAnimationNode"; };
     virtual EClassIDs WhoAmI() const { return HPC_ANIMATION_NODE; };

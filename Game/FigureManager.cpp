@@ -813,17 +813,17 @@ BOOL CFigureManager::LoadAnimationNodeBone(CModelResourceEntry *pModel, CAnimati
         lpData = GetFile(szFileName, &dwSize);
     }
     lpNode->PublishOwnedBone(lpData, dwSize);
-    if (lpData != NULL)
-    {
-        if (dwSize == 72) // old (6 models) bone
-            lpNode->LoadOldBone(lpData);
-        else // new (8 models) bone
-            lpNode->LoadBone(lpData);
-        //
-        return TRUE;
-    }
-    else
+    const bool loaded = lpNode->LoadBone(lpData, dwSize);
+    if (!lpData)
         return FALSE;
+    if (pModel)
+        pModel->GetBones()->CloseFile(lpData);
+    else
+        CloseFile(lpData);
+    if (!loaded)
+        throw std::runtime_error("Invalid BON size " + std::to_string(dwSize) + " for " +
+                                 lpNode->GetMaskName().GetString() + "/" + lpNode->GetName());
+    return TRUE;
 }
 /////////////////////////////////////////////////////////////////////////////////////
 #if defined(_A4) || defined(__OBJECT_CONVERTOR_A4__)
