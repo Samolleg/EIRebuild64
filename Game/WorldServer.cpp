@@ -2112,12 +2112,13 @@ void CreditCompanion(CPlayer &player, const BaseCompanion &companion, float hero
     auto *stats = unit ? unit->GetRPGStats() : fallback;
     if (stats && fifths > 0)
     {
-        // On arrival or hire, settle all representable XP. During a stream of
-        // awards, only run the full RPG recalculation once a whole point is due.
-        const double due = heroShare == 0 ? fifths / 5 : std::floor(fifths / 5);
-        if (due > 0)
+        // Let exactly representable fractions through; batch smaller inexact
+        // awards until a point is due, or settle the balance on arrival/hire.
+        const float oldXP = stats->fpExperience, oldPenalty = stats->fExpPenalty;
+        const double due = fifths / 5;
+        const double target = double(oldXP) + oldPenalty + due;
+        if (heroShare == 0 || due >= 1 || double(float(target)) == target)
         {
-            const float oldXP = stats->fpExperience, oldPenalty = stats->fExpPenalty;
             fifths -= stats->GainExperience(float(due), false) * 5;
             if (unit && (oldXP != stats->fpExperience || oldPenalty != stats->fExpPenalty))
                 unit->RecalcRPGStats();
