@@ -2520,12 +2520,14 @@ HRESULT Renderer::copy_contact_atlas_d3d12(D3D12Texture& source,UINT material,Co
  }
  UINT skip=0;
  while(skip<mips&&(std::max)(1u,width>>skip)>maps.width)++skip;
- maps.pending&=~(std::uint64_t{1}<<material);
- if(format!=maps.format||skip+maps.mips>mips||(std::max)(1u,width>>skip)!=maps.width||(std::max)(1u,height>>skip)!=maps.height)return S_FALSE;
+ if(format!=maps.format||skip+maps.mips>mips||(std::max)(1u,width>>skip)!=maps.width||(std::max)(1u,height>>skip)!=maps.height){
+  maps.pending&=~(std::uint64_t{1}<<material);return S_FALSE;
+ }
  for(UINT mip=0;mip<maps.mips;++mip){
   const HRESULT hr=d3d12_->copy_texture(*maps.atlas12,mip+material*maps.mips,source,mip+skip);
   if(FAILED(hr))return hr;
  }
+ maps.pending&=~(std::uint64_t{1}<<material);
  maps.ready|=std::uint64_t{1}<<material;
  return S_OK;
 }
@@ -2785,6 +2787,41 @@ void Renderer::add_neighbour_blend_maps_d3d12(const NeighbourPiece& upload,const
  }catch(...){report("omitted reason=cpu_allocation");}
 }
 
+// Native game atlases can carry just level zero. Make a compatible contact
+// slice from the published surface when the required BC1 levels are absent.
+// Ordinary terrain draws continue to use the original full-resolution texture.
+static HRESULT make_contact_page(D3D12Frame& device, const SurfaceImage& image,
+                                 UINT side, UINT mip_count, D3D12TextureRef& output) try {
+    if (!image.width || image.width != image.height || (image.width & (image.width-1)) ||
+        !side || side > contact_blend_atlas_side || image.format.dwFourCC != MAKEFOURCC('D','X','T','1'))
+        return E_INVALIDARG;
+    const UINT pitch = (std::max)(1u,(image.width+3)/4)*8;
+    const UINT rows = (std::max)(1u,(image.height+3)/4);
+    if (image.pitch < LONG(pitch) || UINT64(image.pitch)*rows > image.pixels.size()) return E_INVALIDARG;
+    const auto* pixels = image.pixels.data();
+    std::vector<std::uint8_t> packed;
+    if (UINT(image.pitch) != pitch) {
+        packed.resize(std::size_t(pitch)*rows);
+        for (UINT y=0;y<rows;++y)
+            std::memcpy(packed.data()+std::size_t(y)*pitch,pixels+std::size_t(y)*image.pitch,pitch);
+        pixels=packed.data();
+    }
+    std::vector<Bc1ChainLevel> levels;
+    double rms=0; unsigned worst=0; std::size_t peak=0;
+    const auto bytes=normalised_bc1_chain(pixels,image.width,image.height,side,levels,rms,worst,peak);
+    const auto first=std::find_if(levels.begin(),levels.end(),[&](const auto& level){return level.width==side;});
+    if (first==levels.end() || mip_count>std::size_t(levels.end()-first)) return E_INVALIDARG;
+    D3D12TextureRef texture;
+    HRESULT hr=device.create_texture(side,side,DXGI_FORMAT_BC1_UNORM,texture,mip_count);
+    for (UINT i=0;SUCCEEDED(hr) && i<mip_count;++i) {
+        const auto& level=first[i];
+        hr=device.write_texture(*texture,RECT{0,0,LONG(level.width),LONG(level.height)},
+            bytes.data()+level.offset,(std::max)(1u,(level.width+3)/4)*8,i);
+    }
+    if (SUCCEEDED(hr)) output=std::move(texture);
+    return hr;
+} catch (const std::bad_alloc&) { return E_OUTOFMEMORY; }
+
 // The ground contact and terrain material maps on D3D12 (update_contact_blend_maps):
 // the tile grid (t15) and the terrain atlases copied, every level, into one
 // array (t16) as each becomes resident, from the D3D12 terrain textures.
@@ -2842,6 +2879,23 @@ HRESULT Renderer::update_contact_maps_d3d12(){
   if(FAILED(resolved))return resolved;
   if(!source){contact_pending_reason_[material]="its page is not ready for upload";continue;}
   contact_pending_reason_[material]=nullptr;
+  UINT page_width=0,page_height=0,page_mips=0;DXGI_FORMAT page_format{};
+  if(!d3d12_->texture_info(*source,page_width,page_height,page_mips,page_format))return E_FAIL;
+  const UINT side=contact_maps_.atlas12?contact_maps_.width:contact_blend_atlas_side;
+  const UINT needed=contact_maps_.atlas12?contact_maps_.mips:1u;
+  UINT skip=0;
+  while ((page_width>>skip)>side) ++skip;
+  if (page_format==DXGI_FORMAT_BC1_UNORM && page_width==page_height && !(page_width & (page_width-1)) &&
+      (!contact_maps_.atlas12 || contact_maps_.format==page_format) &&
+      ((page_width>>skip)!=side || skip+needed>page_mips)) {
+   ComPtr<ID3D11Texture2D> unused;SurfaceImage* image=nullptr;
+   if (!surface_texture_resolver_) return E_FAIL;
+   HRESULT hr=surface_texture_resolver_(surface_texture_resolver_context_,device_.Get(),surface->id,
+                                        surface->generation,unused,image);
+   if (FAILED(hr) || !image) return FAILED(hr)?hr:E_FAIL;
+   hr=make_contact_page(*d3d12_,*image,side,needed,source);
+   if (FAILED(hr)) return hr;
+  }
   const HRESULT copied=copy_contact_atlas_d3d12(*source,material,contact_maps_);
   if(FAILED(copied))return copied;
   if(copied==S_FALSE){ // each material is refused once (its pending bit is cleared)
