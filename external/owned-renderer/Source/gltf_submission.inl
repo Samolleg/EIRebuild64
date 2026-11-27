@@ -46,13 +46,7 @@ bool prepare_gltf_pose(const RetainedVisualSample &sample,
     unsigned clip = UINT32_MAX;
     const bool neutral = sample.selection.neutral;
     if (sample.riding) {
-        const char* name="ride_seated";
-        switch(sample.rideTransition) {
-            case 1: name="ride_mount_left"; break;
-            case -1: name="ride_mount_right"; break;
-            case 2: name="ride_dismount_left"; break;
-            case -2: name="ride_dismount_right"; break;
-        }
+        const char* name=gltf::riding_clip_name(sample.rideTransition);
         clip = gltf::named_clip(animation,name);
         gltf::animation_require(clip!=UINT32_MAX,"riding pose");
         request.flags=0x80180000u; request.frames=1;
@@ -74,7 +68,11 @@ bool prepare_gltf_pose(const RetainedVisualSample &sample,
     const bool calmRider=sample.riding && !sample.rideTransition && sample.riding_calm && !sample.values.dead;
     const auto idle=state.riding_idle.Update(calmRider,clock,true);
     float idleTime=-1;
-    if(idle.variant) {
+    const auto paired = sample.mountClip.empty() ? UINT32_MAX : gltf::named_clip(animation,sample.mountClip);
+    if (paired!=UINT32_MAX) {
+        clip=paired;
+        idleTime=(std::min)(sample.mountTime,animation.clips[clip].duration);
+    } else if(idle.variant) {
         static constexpr const char* riderClips[]{"ride_idle_look_left","ride_idle_look_right","ride_idle_settle"};
         const auto name=riderClips[idle.variant-1];
         const auto selected=gltf::named_clip(animation,name);

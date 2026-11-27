@@ -1,4 +1,5 @@
 #pragma once
+#include <algorithm>
 #include "../Navigation/Types.h"
 #include "BodyShape.h"
 namespace SaveSchema { class Writer; class Reader; }
@@ -200,6 +201,12 @@ public:
         const double elapsed=now-rideTransitionTick;
         return elapsed>=0 && (ridingHorse>=0 ? elapsed<rideMountTicks :
             dismountHorse>=0 && elapsed<rideDismountTicks);
+    }
+    int RidingTransitionClip(double now) const {
+        return RidingTransition(now) ? (ridingHorse>=0 ? 1 : 2)*rideFlank : 0;
+    }
+    float RidingTransitionProgress(double now) const {
+        return std::clamp(float((now-rideTransitionTick)/(ridingHorse>=0 ? rideMountTicks : rideDismountTicks)),0.f,1.f);
     }
     int dismountHorse = -1;
     double rideTransitionTick = -1000;

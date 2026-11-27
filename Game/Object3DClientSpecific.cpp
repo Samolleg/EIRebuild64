@@ -1080,6 +1080,7 @@ bool CObject3DClientSpecific::PrepareOwnedResources(bool publishAppearance)
         const auto* animation=object->GetAnimationSystem2();
         const auto* action=animation?animation->GetCurrentAnimation():nullptr;
         auto clip=base->view.clip;
+        bool pairedTransfer=false;
         const auto* world=dynamic_cast<const CWorldBase*>(GetWorld());
         float seconds=world?float(world->GetSegmentTimeCounter())*(DW_SEGMENT_TIME/1000.f):0.f;
         if(action && action->dwAnimationLength){
@@ -1101,6 +1102,16 @@ bool CObject3DClientSpecific::PrepareOwnedResources(bool publishAppearance)
             const bool calm=held && !horse->IsMoving() && !horse->IsDead() &&
                 (clip=="idle" || clip.rfind("cidle",0)==0);
             const auto idle=nativeRidingIdle.Update(calm,tick*(DW_SEGMENT_TIME/1000.),false);
+            if (rider && (rider->ridingHorse==horse->GetID() || rider->dismountHorse==horse->GetID())) {
+                if (const int transition=rider->RidingTransitionClip(tick)) {
+                    const auto paired=base->clip_lengths.find(owned::gltf::riding_clip_name(transition));
+                    if (paired!=base->clip_lengths.end()) {
+                        clip=paired->first;
+                        seconds=paired->second*rider->RidingTransitionProgress(tick);
+                        pairedTransfer=true;
+                    }
+                }
+            }
             if (held) {
                 const auto heldClip="tack_held_"+clip;
                 if (base->clip_lengths.count(heldClip)) clip=heldClip;
@@ -1114,8 +1125,10 @@ bool CObject3DClientSpecific::PrepareOwnedResources(bool publishAppearance)
 #endif
         const auto duration=base->clip_lengths.find(clip);
         if(duration!=base->clip_lengths.end() && duration->second>0){
-            if(!action || !action->IsUnique())seconds=std::fmod(seconds,duration->second);
-            seconds=std::floor(seconds*30.f)/30.f;
+            if (!pairedTransfer) {
+                if(!action || !action->IsUnique())seconds=std::fmod(seconds,duration->second);
+                seconds=std::floor(seconds*30.f)/30.f;
+            }
             if(!nativePose || nativePose->motion!=base->motion || nativePose->view.clip!=clip || nativePose->view.seconds!=seconds){
                 nativePose=owned::environment::sample_model(base,clip,seconds);
                 ownedAppearanceAttempted=false;

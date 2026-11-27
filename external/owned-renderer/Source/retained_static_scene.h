@@ -500,6 +500,8 @@ struct RetainedVisualSample {
     bool riding_calm = false;
     int rideTransition = 0; // Signed flank, magnitude 1 to mount or 2 to dismount.
     float rideProgress = 0.f;
+    std::string mountClip;
+    float mountTime = 0.f;
     VisualResourceIncarnation resource{};
     LifecycleIdentity lifecycle{};
     RetainedVisualStatus status = RetainedVisualStatus::awaiting_values;
