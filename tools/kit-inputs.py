@@ -81,15 +81,9 @@ def fingerprint(args):
     names = git(repo, '-c', 'core.quotepath=false', 'ls-files', '--cached', '--others',
                 '--exclude-standard', '-z').decode().split('\0')
     digest = hashlib.sha256()
-    baker = hashlib.sha256()
 
     def field(*values):
-        line = json.dumps(values, ensure_ascii=True, sort_keys=True).encode() + b'\n'
-        digest.update(line)
-        # These translation units have a private object prefix excluded by the offline linker.
-        # Headers, shared code, build recipes and unknown files remain inputs.
-        if values[0] != 'shader-manifest' and not re.fullmatch(r'source/Game/GameplayOnly/[^/]+\.cpp', values[0]):
-            baker.update(line)
+        digest.update(json.dumps(values, ensure_ascii=True, sort_keys=True).encode() + b'\n')
 
     def record(label, path):
         if path.is_symlink() or path.is_junction():
@@ -184,10 +178,6 @@ def fingerprint(args):
     if args.manifest:
         manifest = json.loads(args.manifest.read_text('utf-8-sig'))
         field('shader-manifest', manifest)
-        # A gameplay commit changes the shader donor and its change list, even
-        # when the actual link inputs are identical.
-        baker.update(json.dumps(['shader-payloads', manifest['files'], manifest['libraries'],
-                                 manifest.get('resource_dll_sha256')], sort_keys=True).encode())
         donor = Path(manifest['accepted_exe'])
         if sha(donor) != manifest['accepted_exe_sha256']:
             raise ValueError('accepted shader donor changed')
@@ -200,8 +190,6 @@ def fingerprint(args):
             for ext, key in (('.lib', 'sha256'), ('.pdb', 'pdb_sha256')):
                 if sha(folder / (name + ext)) != row[key]:
                     raise ValueError('shader reuse library changed')
-    if args.baker_key:
-        args.baker_key.write_text(baker.hexdigest(), encoding='ascii')
     hashes.save()
     print(f'Build inputs: {hashes.reused} reused, {hashes.hashed} hashed ({hashes.bytes_read} bytes).', file=sys.stderr)
     return digest.hexdigest()
@@ -213,7 +201,6 @@ if __name__ == '__main__':
         parser.add_argument('--' + arg, type=Path, required=True)
     parser.add_argument('--sdk-version', required=True)
     parser.add_argument('--manifest', type=Path)
-    parser.add_argument('--baker-key', type=Path)
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument('--save-external', type=Path)
     mode.add_argument('--check-external', type=Path)

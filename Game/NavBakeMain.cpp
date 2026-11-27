@@ -1,6 +1,5 @@
 #include "../stdafx.h"
 #include "WorldServer.h"
-#include "CompanionExperience.h"
 #include "ModRuntime.h"
 #include "ModPackage.h"
 #include "ModCliTool.h"
@@ -32,13 +31,6 @@
 #include "nlohmann/json.hpp"
 #include <bcrypt.h>
 #pragma comment(lib,"bcrypt.lib")
-// Offline scene import has no active party. A gameplay call here indicates
-// that the importer has crossed into live simulation.
-void CreditCompanion(CPlayer &, const BaseCompanion &, float, CUnitServer *, SRPGUnitStats *)
-{
-    throw std::logic_error("Unexpected experience award during offline navigation import");
-}
-
 namespace {
 // Stream hashes keep large resource archives out of the map working set.
 Navigation::Bytes FileDigest(const std::filesystem::path& path) {

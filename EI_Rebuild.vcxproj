@@ -351,9 +351,6 @@
     <ClCompile Include="Game\ModFinalGolemVisual.cpp" />
     <ClCompile Include="Game\WorldInterface.cpp" />
     <ClCompile Include="Game\WorldServer.cpp" />
-    <ClCompile Include="Game\GameplayOnly\*.cpp">
-      <ObjectFileName>$(IntDir)GameplayOnly_%(Filename).obj</ObjectFileName>
-    </ClCompile>
     <ClCompile Include="Game\ZoneExit.cpp" />
     <ClCompile Include="shared\Common.cpp" />
     <ClCompile Include="Game\PhysicsFxPhysX.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
@@ -643,8 +640,7 @@
   </ImportGroup>
 <Import Project="tools/TaskCache.targets" />
   <Import Project="tools/physx/PhysX.targets" />
-  <!-- The baker consumes members of the current link, never leftover objects from a prior checkout. -->
-  <Target Name="WriteNavBakeObjects" AfterTargets="Link" Condition="'$(MSBuildProjectName)'=='EI_Rebuild'">
+  <Target Name="WriteNavBakeObjects" AfterTargets="Link" Condition="'$(MSBuildProjectName)'=='EI_Rebuild' and '$(EIExportNavBakeObjects)'=='true'">
     <ItemGroup>
       <_NavBakeObject Include="@(Link)" Condition="'%(Link.Extension)'=='.obj'" />
     </ItemGroup>
