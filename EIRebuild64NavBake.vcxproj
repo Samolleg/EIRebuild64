@@ -4,6 +4,7 @@
        MPR/MOB/BASE extraction, body sizing, profiles, Recast and serialization. -->
   <Import Project="EI_Rebuild.vcxproj" />
   <PropertyGroup>
+    <BuildDependsOn Condition="'$(EIReuseVerifiedNavBake)'=='true'"></BuildDependsOn>
     <ProjectGuid>{7D770D60-B31E-4A77-AF67-BAFD6209B00A}</ProjectGuid>
     <TargetName>EIRebuild64NavBake</TargetName>
     <TargetFileName>$(TargetName)$(TargetExt)</TargetFileName>
@@ -25,8 +26,11 @@
     <Link><SubSystem>Console</SubSystem><EntryPointSymbol>wmainCRTStartup</EntryPointSymbol></Link>
   </ItemDefinitionGroup>
   <Target Name="LinkSharedNavigationHost" BeforeTargets="Link">
+    <ReadLinesFromFile File="$(MSBuildThisFileDirectory)out\obj\x64\$(Configuration)\EI_Rebuild\NavBake.objects">
+      <Output TaskParameter="Lines" ItemName="_CurrentEngineObjects" />
+    </ReadLinesFromFile>
     <ItemGroup>
-      <Link Include="$(MSBuildThisFileDirectory)out\obj\x64\$(Configuration)\EI_Rebuild\*.obj" Exclude="$(MSBuildThisFileDirectory)out\obj\x64\$(Configuration)\EI_Rebuild\GameplayOnly_*.obj;$(MSBuildThisFileDirectory)out\obj\x64\$(Configuration)\EI_Rebuild\Navigation_Cache.obj;$(MSBuildThisFileDirectory)out\obj\x64\$(Configuration)\EI_Rebuild\DetourTileCache*.obj;$(MSBuildThisFileDirectory)out\obj\x64\$(Configuration)\EI_Rebuild\E1RendererFacadeCheck.obj" />
+      <Link Include="@(_CurrentEngineObjects)" Exclude="$(MSBuildThisFileDirectory)out\obj\x64\$(Configuration)\EI_Rebuild\GameplayOnly_*.obj;$(MSBuildThisFileDirectory)out\obj\x64\$(Configuration)\EI_Rebuild\Navigation_Cache.obj;$(MSBuildThisFileDirectory)out\obj\x64\$(Configuration)\EI_Rebuild\DetourTileCache*.obj;$(MSBuildThisFileDirectory)out\obj\x64\$(Configuration)\EI_Rebuild\E1RendererFacadeCheck.obj" />
     </ItemGroup>
     <Error Condition="!Exists('$(MSBuildThisFileDirectory)out\obj\x64\$(Configuration)\EI_Rebuild\NavigationWorld.obj')" Text="Build the EI_Rebuild project before linking NavBake." />
   </Target>

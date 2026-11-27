@@ -643,4 +643,12 @@
   </ImportGroup>
 <Import Project="tools/TaskCache.targets" />
   <Import Project="tools/physx/PhysX.targets" />
+  <!-- The baker consumes members of the current link, never leftover objects from a prior checkout. -->
+  <Target Name="WriteNavBakeObjects" AfterTargets="Link" Condition="'$(MSBuildProjectName)'=='EI_Rebuild'">
+    <ItemGroup>
+      <_NavBakeObject Include="@(Link)" Condition="'%(Link.Extension)'=='.obj'" />
+    </ItemGroup>
+    <Error Condition="'@(_NavBakeObject)'==''" Text="No engine objects were supplied to the linker." />
+    <WriteLinesToFile File="$(IntDir)NavBake.objects" Lines="@(_NavBakeObject->'%(FullPath)')" Overwrite="true" WriteOnlyWhenDifferent="true" />
+  </Target>
 </Project>

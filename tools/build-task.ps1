@@ -242,7 +242,6 @@ try {
     # are not dependencies and must not scan the entire Windows SDK.
     $sourceCommit = (& git -C $sourceRepo -c "safe.directory=$sourceRepo" describe --always --abbrev=12 --dirty --exclude=*).Trim()
     if ($LASTEXITCODE -ne 0 -or !$sourceCommit) { throw 'Cannot identify source commit.' }
-    $solution = 'EI_Rebuild.sln'
     $bakerWork = Join-Path $repo 'out/x64/Release/EIRebuild64NavBake'
     $bakerSource = $bakerWork
     $bakerHit = $false
@@ -251,7 +250,9 @@ try {
         foreach ($folder in @((Join-Path $project 'builds/rebuild64/current'),$bakerWork)) {
             $record = Join-Path $folder 'NavBake.inputs.json'
             if (![IO.File]::Exists($record)) { continue }
-            $savedBaker = Get-Content -Raw -LiteralPath $record | ConvertFrom-Json
+            try { $savedBaker = Get-Content -Raw -LiteralPath $record | ConvertFrom-Json -AsHashtable -ErrorAction Stop }
+            catch { Write-Host "Ignoring unreadable NavBake receipt in $folder."; continue }
+            if ($savedBaker -isnot [System.Collections.IDictionary]) { continue }
             if ($savedBaker.key -cne $bakerKey) { continue }
             $exe = Join-Path $folder 'EIRebuild64NavBake.exe'
             $pdb = Join-Path $folder 'EIRebuild64NavBake.pdb'
@@ -263,23 +264,17 @@ try {
         }
     }
     if ($bakerHit) {
-        # Filter the real solution, preserving its configuration and dependencies.
-        $projects = @(foreach ($line in [IO.File]::ReadLines((Join-Path $repo $solution))) {
-            if ($line -match '^Project\("[^"]+"\) = "[^"]+", "([^"]+\.vcxproj)",' -and
-                $Matches[1] -ne 'EIRebuild64NavBake.vcxproj') { $Matches[1] }
-        })
-        if (!$projects.Count) { throw 'No build projects found in the solution.' }
-        $filter = Join-Path $privateTemp 'game.slnf'
-        [IO.File]::WriteAllText($filter, (@{solution=@{path=(Join-Path $repo $solution);projects=$projects}} | ConvertTo-Json -Depth 4))
-        $solution = $filter
         Write-Host "NavBake: reuse verified EXE and PDB from $bakerSource; project skipped."
     } else {
         # A changed input also invalidates the link when a former object was removed.
-        if ([IO.Directory]::Exists($bakerWork)) { [IO.File]::Delete((Join-Path $bakerWork 'NavBake.inputs.json')) }
-        if ([IO.Directory]::Exists($bakerWork)) { [IO.File]::Delete((Join-Path $bakerWork 'EIRebuild64NavBake.exe')) }
+        if ([IO.Directory]::Exists($bakerWork)) {
+            [IO.File]::Delete((Join-Path $bakerWork 'NavBake.inputs.json'))
+            [IO.File]::Delete((Join-Path $bakerWork 'EIRebuild64NavBake.exe'))
+        }
         Write-Host 'NavBake: build offline project.'
     }
-    $arguments = @("/p:ScriptCheckCommit=$sourceCommit",$solution,"/m:$cores",'/nr:false','/t:Build','/p:Configuration=Release','/p:Platform=x64','/p:PreferredToolArchitecture=x64',"/p:VCToolsVersion=$vcversion","/p:WindowsTargetPlatformVersion=$sdkversion","/p:UserRootDir=$privateTemp\",'/nologo','/v:minimal')
+    $arguments = @("/p:ScriptCheckCommit=$sourceCommit",'EI_Rebuild.sln',"/m:$cores",'/nr:false','/t:Build','/p:Configuration=Release','/p:Platform=x64','/p:PreferredToolArchitecture=x64',"/p:VCToolsVersion=$vcversion","/p:WindowsTargetPlatformVersion=$sdkversion","/p:UserRootDir=$privateTemp\",'/nologo','/v:minimal')
+    if ($bakerHit) { $arguments += '/p:EIReuseVerifiedNavBake=true' }
     if ($shaderReuse) {
         $reuseFolder = Split-Path -Parent $ShaderResourceManifest
         $destination = Join-Path $repo 'out/x64/Release/RendererShaders'
@@ -332,7 +327,7 @@ try {
     }
     if ($PhysicsFxCheck) {
         # Keep the shared work tree locked through this dependent native check build.
-        $checkArgs = @($arguments | Where-Object { $_ -notlike '*.sln' -and $_ -notlike '*.slnf' -and $_ -notlike '/flp:*' })
+        $checkArgs = @($arguments | Where-Object { $_ -notlike '*.sln' -and $_ -notlike '/flp:*' })
         $checkArgs = @($checkArgs | Where-Object { $_ -notlike '/t:*' })
         & (Join-Path $PSScriptRoot 'invoke-build.ps1') $msbuild (Join-Path $repo 'PhysicsFxRenderCheck.vcxproj') @checkArgs /p:BuildProjectReferences=false *> (Join-Path $task 'physics-render-build.txt')
         if ($LASTEXITCODE -ne 0) { throw 'Physics render check build failed.' }
@@ -400,7 +395,7 @@ try {
     $finalIdentity = Get-KitInputIdentity
     $finalBakerKey = if ($finalIdentity) { [IO.File]::ReadAllText($bakerKeyPath) }
     if ($bakerHit -and $finalBakerKey -cne $bakerKey) { throw 'NavBake inputs changed during reuse.' }
-    if ($finalBakerKey) {
+    if ($bakerKey -and $finalBakerKey -ceq $bakerKey) {
         $record = @{key=$finalBakerKey;exe=(Hash-File (Join-Path $kit 'EIRebuild64NavBake.exe'));pdb=(Hash-File (Join-Path $kit 'EIRebuild64NavBake.pdb'))} | ConvertTo-Json -Compress
         Write-Utf8 (Join-Path $kit 'NavBake.inputs.json') $record
         if (!$bakerHit) { Write-Utf8 (Join-Path $bakerWork 'NavBake.inputs.json') $record }
