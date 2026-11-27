@@ -3019,9 +3019,9 @@ BOOL CWorldClient::Draw()
     // Use the same segment clock and scale as the game sun. Presentation time
     // can advance beyond the next segment while waiting for a network packet.
     const double visualHours = ownedWorld.game_hours +
-        (ownedWorld.world_time - GetSegmentTimeCounter()) * GetTimeInHours(1);
+        double(fpTimeFraction) * GetTimeInHours(1);
     environment.visual_sun_supported = true;
-    if (std::isfinite(visualHours)) {
+    if (fpTimeFraction >= 0.f && std::isfinite(visualHours)) {
         environment.visual_sun_hour = std::fmod(visualHours, 24.0);
         if (environment.visual_sun_hour < 0.0) environment.visual_sun_hour += 24.0;
         environment.visual_sun_time_valid = true;
