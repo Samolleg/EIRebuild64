@@ -2051,7 +2051,7 @@ static const char *pszLocalMercZone[N_MAX_MERC_NUMBER] = {
 namespace {
 struct BaseCompanion {
     int id;
-    CString key;
+    std::string key;
 };
 
 const std::array<BaseCompanion, N_MAX_MERC_NUMBER> &BaseCompanions()
@@ -2063,7 +2063,7 @@ const std::array<BaseCompanion, N_MAX_MERC_NUMBER> &BaseCompanions()
             CString name;
             name.Format("merc%d", i + 1);
             list[i].id = GetPersonageIDByName(name);
-            list[i].key.Format("dejavu.base_xp.merc%d", i + 1);
+            list[i].key = std::string("dejavu.base_xp.") + name.GetString();
         }
         return list;
     }();
@@ -2086,12 +2086,15 @@ bool IsBaseCompanion(int id)
 
 bool ApplyBaseExperience(CPlayer &player, const BaseCompanion &companion, SRPGUnitStats &stats, float earned)
 {
-    const float pending = player.party.vars.GetVar(companion.key);
-    if (pending + earned <= 0)
+    auto &balances = player.party.vars;
+    auto pending = balances.find(companion.key);
+    if (pending != balances.end())
+        earned += pending->second;
+    if (earned <= 0)
         return false;
-    stats.GainExperience(pending + earned, false);
-    if (pending > 0)
-        static_cast<CPlayerServer *>(player.GetPlayerSpecific())->SetVar(companion.key, 0);
+    stats.GainExperience(earned, false);
+    if (pending != balances.end())
+        balances.erase(pending);
     return true;
 }
 
@@ -2157,19 +2160,20 @@ void CWorldServer::CreditBaseCompanions(CPlayer &player, float heroShare)
 {
     if (!(heroShare > 0) || !std::isfinite(heroShare) || !BaseCompanionExperienceActive(*this))
         return;
+    const float earned = heroShare * 0.2f;
+    const auto &companions = BaseCompanions();
     for (int merc = 1; merc <= N_MAX_MERC_NUMBER; ++merc)
     {
-        const auto &companion = BaseCompanions()[merc - 1];
+        const auto &companion = companions[merc - 1];
         if (HasMerc(&player, companion.id))
             continue;
-        const float earned = heroShare * 0.2f;
         auto *unit = curInterface == IFACE_BASE && szCurrentZoneName.CompareNoCase(pszLocalMercZone[merc - 1]) == 0
             ? GetUnit(companion.id) : nullptr;
         if (unit && !unit->IsDead())
             ApplyBaseExperience(player, companion, *static_cast<CUnitServer *>(unit->GetUnitSpecific()), earned);
         else
-            static_cast<CPlayerServer *>(player.GetPlayerSpecific())->SetVar(companion.key,
-                player.party.vars.GetVar(companion.key) + earned);
+            // Private server balance, serialized with the party. No UI or script event is needed.
+            player.party.vars[companion.key] += earned;
     }
 }
 
