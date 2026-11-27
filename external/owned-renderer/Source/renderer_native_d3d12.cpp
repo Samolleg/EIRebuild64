@@ -8225,9 +8225,8 @@ HRESULT Renderer::flush_native_shadows_d3d12(){
       draw_state.raster.DepthBiasClamp=clamp>0?std::exp2(std::floor(std::log2(clamp)*4.f)/4.f):0.f;
      }
      if(constants.alpha_test){
-      auto sampling=world_texture_sampler(state.stage[0][D3DTSS_MINFILTER],state.stage[0][D3DTSS_MAGFILTER],state.stage[0][D3DTSS_MIPFILTER],
+      const auto sampling=world_texture_sampler(state.stage[0][D3DTSS_MINFILTER],state.stage[0][D3DTSS_MAGFILTER],state.stage[0][D3DTSS_MIPFILTER],
        state.stage[0][D3DTSS_ADDRESSU],state.stage[0][D3DTSS_ADDRESSV],true,1u<<configured_integer(debug_overlay_.config(),"anisotropy",3));
-      if(!point&&!rain) sampling.description.MaxLOD=0;
       d3d12_->set_sampler(0,sampling.description);
      }
      // Every shelter caster runs the pixel stage, so the mask holds the top

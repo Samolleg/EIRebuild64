@@ -2154,7 +2154,13 @@ HRESULT Renderer::present_frame_d3d12(const ScenePresentInputs* inputs){
  }
  finish_harness_world_shot(inputs);
  // Capture and outer-frame recording use the same lifecycle on both backends.
- const bool f11_capture=debug_overlay_.consume_capture_request()||take_core_capture();
+ static bool previous_request=false;
+ char marker[MAX_PATH]{};
+ const bool requested=shadow_temporal_diagnostic_enabled()&&
+   GetEnvironmentVariableA("EI_TEST_SHADOW_CAPTURE_MARKER",marker,MAX_PATH)>0&&
+   GetFileAttributesA(marker)!=INVALID_FILE_ATTRIBUTES;
+ const bool f11_capture=debug_overlay_.consume_capture_request()||take_core_capture()||(requested&&!previous_request);
+ previous_request=requested;
  bool recorder_armed_this_present=false;
  const auto temporal_outcome=profiler_.shadow_temporal_present(presentation_frame_index_);
  if(harness_shadow_temporal_outcome_==ShadowTemporalPresentOutcome::waiting&&
