@@ -15,6 +15,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <unordered_map>
@@ -706,6 +707,7 @@ struct RetainedShadowActiveTerrainValue {
 struct RetainedShadowInputDomain {
     std::uint64_t source_revision = 0;
     std::array<float,16> world_to_clip{};
+    std::optional<float> camera_anchor_z;
     NativeWorldLighting lighting{};
     std::uint32_t class_flags = 0;
     bool draw_undetected = false;
