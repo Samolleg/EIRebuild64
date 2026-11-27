@@ -179,6 +179,7 @@ public:
     //
     // give experience
     void GainExperience(CPlayer *pPlayer, float fpExp);
+    void CreditBaseCompanions(CPlayer &player, float heroShare);
     // function to use from script to create units from minimal information
     void AddPersonage(int nID, const char *pszPrototype, const char *pszName,
                       const CPlot3D &ptPlace);

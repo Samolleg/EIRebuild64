@@ -698,6 +698,8 @@ void NConsole::ProcessGive(const CStringArray &szParams)
         float fExp = float(atof(szParams[2]) / nUnits);
         for (int i = 0; i < nUnits; i++)
             pPlayer->party.people[i].stats.GainExperience(fExp);
+        if (nUnits > 0)
+            theWorldServer.CreditBaseCompanions(*pPlayer, fExp);
         pPlayerServer->SendParty();
     }
     else if (szParams[1] == "assortment")
