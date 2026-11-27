@@ -1910,20 +1910,16 @@ BOOL CWorldClient::AdjustLightingWithTime()
     // check for midnight time swap (from 23.99 to 0.00)
     if (fpOldAdjustTime > fpTime)
         fpOldAdjustTime = -1;
-    // Use the client presentation clock between simulation ticks, including
-    // its frozen fraction on combat pause. Scripts and gameplay keep tick time.
-    const float sunTime = static_cast<float>(std::fmod(double(fpTime) +
-        std::clamp(double(fpTimeFraction), 0.0, 1.0) * GetTimeInHours(1), 24.0));
-    if ((sunTime >= TIME_MORNING) && (sunTime <= TIME_EVENING)) // day sun track
-        alpha = 30.0f + 30.0f * (1.0f - (fabs(sunTime - (TIME_EVENING + TIME_MORNING) * 0.5f) /
+    if ((fpTime >= TIME_MORNING) && (fpTime <= TIME_EVENING)) // day sun track
+        alpha = 30.0f + 30.0f * (1.0f - (fabs(fpTime - (TIME_EVENING + TIME_MORNING) * 0.5f) /
                                          (TIME_EVENING - TIME_MORNING) * 2.0f));
-    else if (sunTime > TIME_EVENING) // night sun track
-        alpha = 30.0f + 45.0f * ((sunTime - TIME_EVENING) / (24.0f - TIME_EVENING));
+    else if (fpTime > TIME_EVENING) // night sun track
+        alpha = 30.0f + 45.0f * ((fpTime - TIME_EVENING) / (24.0f - TIME_EVENING));
     else
-        alpha = 30.0f + 45.0f * ((TIME_MORNING - sunTime) / TIME_MORNING);
+        alpha = 30.0f + 45.0f * ((TIME_MORNING - fpTime) / TIME_MORNING);
     alpha = ToRadian(alpha);
     //
-    phi = float((sunTime / 24.0f) * 2.0f * pi);
+    phi = float((fpTime / 24.0f) * 2.0f * pi);
     // sun direction
     ptVector.x = float(cos(alpha) * cos(phi));
     ptVector.y = float(cos(alpha) * sin(phi));
@@ -3020,6 +3016,16 @@ BOOL CWorldClient::Draw()
     environment.hour = float(std::fmod(ownedWorld.game_hours, 24.0));
     if (environment.hour < 0.f) environment.hour += 24.f;
     environment.world_time = ownedWorld.world_time;
+    // Use the same segment clock and scale as the game sun. Presentation time
+    // can advance beyond the next segment while waiting for a network packet.
+    const double visualHours = ownedWorld.game_hours +
+        (ownedWorld.world_time - GetSegmentTimeCounter()) * GetTimeInHours(1);
+    environment.visual_sun_supported = true;
+    if (std::isfinite(visualHours)) {
+        environment.visual_sun_hour = std::fmod(visualHours, 24.0);
+        if (environment.visual_sun_hour < 0.0) environment.visual_sun_hour += 24.0;
+        environment.visual_sun_time_valid = true;
+    }
     environment.cave = (ownedWorld.flags & EI_RENDERER_WORLD_CAVE) != 0;
     environment.region = ownedWorld.region;
     environment.weather_current = ownedWorld.weather_current;

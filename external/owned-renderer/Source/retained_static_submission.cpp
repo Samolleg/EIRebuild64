@@ -1,5 +1,4 @@
 #include "retained_static_submission.h"
-#include "engine_bridge.h"
 #include "astral_rift.h"
 #include "owned_resource_runtime.h"
 #include <atomic>
@@ -208,6 +207,32 @@ bool prepare_failed(RetainedStaticPrepareDiagnostic* diagnostic,
 }
 
 } // namespace
+
+NativeWorldLighting shadow_projection_lighting(const NativeWorldLighting& lighting) noexcept {
+    NativeWorldLighting result=lighting;
+    double length_squared=0;
+    for(unsigned axis=0;axis<3;++axis)
+        length_squared+=double(lighting.sunlight_direction[axis])*
+            lighting.sunlight_direction[axis];
+    // Direct sunlight keeps the game's exact direction. The sun-map
+    // projections hold one direction until the sun has turned 0.25 degrees
+    // from it, then take the current one. Every change of direction redraws
+    // every sun map in full (nothing can be scrolled across it); the previous
+    // per-axis 1/512 snap changed every ~12 frames with the game clock running
+    // (L-077), while 0.5-degree steps were visibly stepped. The hold follows
+    // the game sun, so it advances with game time and freezes on pause.
+    if (!(length_squared>1e-12) || !finite_value(length_squared)) return result;
+    const double length=std::sqrt(length_squared);
+    std::array<double,3> current{};
+    for(unsigned axis=0;axis<3;++axis)current[axis]=lighting.sunlight_direction[axis]/length;
+    static std::array<double,3> held{};static bool held_valid=false;
+    constexpr double cos_quarter_degree=0.9999904807207345;
+    const double dot=held[0]*current[0]+held[1]*current[1]+held[2]*current[2];
+    if(!held_valid || !(dot>=cos_quarter_degree)){held=current;held_valid=true;}
+    for(unsigned axis=0;axis<3;++axis)
+        result.sunlight_direction[axis]=static_cast<float>(held[axis]);
+    return result;
+}
 
 bool retained_object_matrix(
     const std::array<float, 3>& position,
@@ -953,7 +978,7 @@ double shadow_clip_depth(const std::array<Scalar, 16>& matrix,
 
 bool finish_shadow_receiver_xy(RetainedDirectionalSlice& slice,
     const std::array<double, 2>& center, double half_extent,
-    std::uint32_t map_side, const std::array<double,2>& grid_origin = {}) noexcept {
+    std::uint32_t map_side) noexcept {
     if (!slice.receivers_in_light.valid) return true;
     auto& bounds = slice.receivers_in_light;
     double magnitude = 1;
@@ -976,7 +1001,7 @@ bool finish_shadow_receiver_xy(RetainedDirectionalSlice& slice,
     if (!finite_value(slice.light_radius) || slice.light_radius <= 0) return false;
     const double texel = 2*radius/map_side;
     for (unsigned axis = 0; axis < 2; ++axis) {
-        slice.light_center[axis] = static_cast<float>(grid_origin[axis]+std::round((center[axis]-grid_origin[axis])/texel)*texel);
+        slice.light_center[axis] = static_cast<float>(std::floor(center[axis]/texel+.5)*texel);
         bounds.minimum[axis] = next_float(static_cast<float>(bounds.minimum[axis]-3*texel), -INFINITY);
         bounds.maximum[axis] = next_float(static_cast<float>(bounds.maximum[axis]+3*texel), INFINITY);
         if (double(slice.light_center[axis])-radius > bounds.minimum[axis] ||
@@ -1002,7 +1027,7 @@ bool fit_shadow_receiver_xy(RetainedDirectionalSlice& slice,
 bool fit_shadow_camera_slice_xy(RetainedDirectionalSlice& slice,
     const ShadowFrustum& section,
     const std::array<std::array<float, 3>, 3>& light_axes,
-    std::uint32_t map_side, unsigned cascade, std::uint64_t terrain_generation) noexcept {
+    std::uint32_t map_side) noexcept {
     if (!slice.receivers_in_light.valid) return true;
     ShadowPoint near_center{}, far_center{}, delta{};
     for (unsigned axis = 0; axis < 3; ++axis) {
@@ -1039,23 +1064,8 @@ bool fit_shadow_camera_slice_xy(RetainedDirectionalSlice& slice,
     for (unsigned axis = 0; axis < 2; ++axis)
         for (unsigned component = 0; component < 3; ++component)
             light_center[axis] += double(light_axes[axis][component])*center[component];
-    // Rotate the sampling lattice around the visible frustum, not the map's
-    // world origin. Under a moving sun the latter sweeps thin, stationary
-    // casters across texels in proportion to their distance from (0,0,0).
-    // Keep translation snapped in whole texels when the camera pans.
-    struct Grid { ShadowPoint center{}; std::array<double,2> residual{}; std::uint64_t generation=0; };
-    static thread_local std::array<Grid,3> grids;
-    auto& grid=grids[cascade];
-    std::array<double,2> origin=terrain_generation ? light_center : std::array<double,2>{};
-    if (terrain_generation && grid.generation==terrain_generation) {
-        origin=grid.residual;
-        for(unsigned axis=0;axis<2;++axis)
-            for(unsigned k=0;k<3;++k) origin[axis]+=double(light_axes[axis][k])*grid.center[k];
-    }
-    if (!finish_shadow_receiver_xy(slice,light_center,std::sqrt(radius_squared),map_side,origin)) return false;
-    grid.center=center;grid.generation=terrain_generation;
-    for(unsigned axis=0;axis<2;++axis) grid.residual[axis]=double(slice.light_center[axis])-light_center[axis];
-    return true;
+    return finish_shadow_receiver_xy(slice, light_center,
+        std::sqrt(radius_squared),map_side);
 }
 
 bool base_terrain_quality_anchor(const std::array<double,16>& camera_matrix,
@@ -1800,7 +1810,7 @@ bool build_retained_directional_coverage(
                                 static_cast<float>(point[component]);
                     include_world_point(quality.receivers_in_light,projected);
                 }
-                if(!fit_shadow_camera_slice_xy(quality,section,result.light_axes,map_side,index,base_terrain_generation)) return false;
+                if(!fit_shadow_camera_slice_xy(quality,section,result.light_axes,map_side)) return false;
                 // Close cascades follow camera depth, so an approach can
                 // only advance from C2 to C1 to C0. The fitted light center
                 // covers the entire depth band independently of terrain rays.
@@ -1965,7 +1975,7 @@ bool build_retained_directional_coverage(
             });
         }
         if (perspective && index < 3) {
-            if (!fit_shadow_camera_slice_xy(slice, section, result.light_axes,map_side,index,base_terrain_generation)) return false;
+            if (!fit_shadow_camera_slice_xy(slice, section, result.light_axes,map_side)) return false;
         } else if (!fit_shadow_receiver_xy(slice,map_side)) return false;
     }
     result.valid = true;
@@ -2171,22 +2181,6 @@ bool build_retained_shadow_frame(const RetainedDirectionalCoverage& coverage,
             for(float value:slice.world_to_light)if(!finite_value(value))return false;
         }
         frame.slices[4].bias[2]=coverage.spatial_selection?1.f:0.f;
-        static thread_local std::array<float,3> logged{};
-        if (logged!=coverage.light_axes[2]) {
-            logged=coverage.light_axes[2];
-            for(unsigned i=0;i<5;++i) {
-                const auto& s=frame.slices[i];
-                auto at=[](const std::array<float,16>& m,unsigned i) {
-                    return m[i*4]*343.878+m[i*4+1]*263.46+m[i*4+2]*11.505+m[i*4+3];
-                };
-                char line[384]{};
-                std::snprintf(line,sizeof(line),"i=%u spatial=%d texel=%.6f side=%u pixel=%.5f,%.5f lightz=%.4f camzw=%.5f,%.5f sun=%.7f,%.7f,%.7f",
-                    i,int(coverage.spatial_selection),s.bias[0],coverage.map_side,
-                    (.5+.5*at(s.world_to_light,0))*coverage.map_side,(.5-.5*at(s.world_to_light,1))*coverage.map_side,
-                    at(s.world_to_light,2),at(s.camera_slice,2),at(s.camera_slice,3),logged[0],logged[1],logged[2]);
-                bridge_append_probe_event("shadow_grid_probe",line);
-            }
-        }
         frame.publication_serial=next_retained_shadow_revision();
         return true;
     }catch(...){frame={};return false;}
