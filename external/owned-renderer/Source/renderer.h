@@ -1319,7 +1319,8 @@ public:
     void end_world_map_marker();
     void draw_world_map_markers();
     // Scene thread: the same, with the world environment read on the game thread.
-    bool set_native_world_lighting(const NativeWorldLighting& lighting,const WorldEnvironment* environment) noexcept;
+    bool set_native_world_lighting(const NativeWorldLighting& lighting,const WorldEnvironment* environment,NativeWorldLighting* applied=nullptr) noexcept;
+    bool prepare_current_shadow_lighting(NativeWorldLighting& lighting,const WorldEnvironment& environment,bool& matching) noexcept;
     // A portrait owns its light only after the world is composited. Its final
     // flush precedes restoring the exact prepared light, without cave reshaping.
     class PortraitLightingScope {
@@ -5823,6 +5824,7 @@ private:
     ComPtr<ID3D11Buffer> shadow_history_constants_;
     ComPtr<ID3D11SamplerState> shadow_history_sampler_;
     std::array<float,16> shadow_history_previous_clip_{};
+    std::array<float,4> shadow_history_previous_sun_{};
     std::uint64_t shadow_history_previous_epoch_=0;
     std::uint64_t shadow_history_previous_frame_=UINT64_MAX;
     std::uint64_t shadow_history_current_frame_=UINT64_MAX;

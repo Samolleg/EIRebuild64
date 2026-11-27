@@ -779,6 +779,7 @@ struct NativeShadowSlice {
     bool enabled = false;
 };
 struct NativeShadowFrame {
+    bool matching_current_sun = false; // projection and depth use the WorldScene shading Sun
     std::array<NativeShadowSlice,5> slices{};
     // Authoritative lifecycle epoch; far-map cadence must not reuse a prior scene.
     std::uint64_t world_epoch = 0;
@@ -1230,7 +1231,18 @@ using NativeWorldLightingSetFn = bool (*)(void* context,
 using NativeShadowBeginFn = bool (*)(void*, const NativeShadowFrame&, std::uint8_t&);
 // After a successful begin: the light projection each sun map is drawn with
 // this frame, and the far slices that keep a retained (older) projection.
+// Immutable value snapshot for fitting; never carries borrowed scroll state.
+struct NativeShadowPhaseReference {
+    std::array<std::array<float,16>,5> world_to_light{};
+    std::uint64_t world_epoch=0;
+    unsigned side=0;
+    std::uint8_t valid_mask=0;
+    bool matching_current_sun=false;
+};
 struct NativeShadowCullProjection {
+    std::uint64_t world_epoch=0;
+    std::uint8_t valid_mask=0;
+    bool matching_current_sun=false;
     std::array<std::array<float,16>,5> world_to_light{};
     std::uint8_t retained_mask = 0;
     // Maps whose cached static layer scrolls this frame: only casters reaching
@@ -2252,6 +2264,7 @@ struct RetainedTerrainSourceSnapshot;
 struct OwnedTerrainFramePacket;
 struct OwnedTerrainDynamicSector;
 struct EmbeddedVisualFrameInputs {
+    bool matching_current_sun = false;
     std::shared_ptr<const RetainedVisualFrame> completed_visuals;
     // Synchronous completed host terrain, owned by the caller for this draw.
     const RetainedTerrainSourceSnapshot* terrain_source = nullptr;

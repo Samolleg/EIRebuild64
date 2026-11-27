@@ -3016,6 +3016,16 @@ BOOL CWorldClient::Draw()
     environment.hour = float(std::fmod(ownedWorld.game_hours, 24.0));
     if (environment.hour < 0.f) environment.hour += 24.f;
     environment.world_time = ownedWorld.world_time;
+    // Use the same segment clock and scale as the game sun. Presentation time
+    // can advance beyond the next segment while waiting for a network packet.
+    const double visualHours = ownedWorld.game_hours +
+        double(fpTimeFraction) * GetTimeInHours(1);
+    environment.visual_sun_supported = true;
+    if (fpTimeFraction >= 0.f && std::isfinite(visualHours)) {
+        environment.visual_sun_hour = std::fmod(visualHours, 24.0);
+        if (environment.visual_sun_hour < 0.0) environment.visual_sun_hour += 24.0;
+        environment.visual_sun_time_valid = true;
+    }
     environment.cave = (ownedWorld.flags & EI_RENDERER_WORLD_CAVE) != 0;
     environment.region = ownedWorld.region;
     environment.weather_current = ownedWorld.weather_current;

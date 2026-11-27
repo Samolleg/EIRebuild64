@@ -2716,7 +2716,8 @@ float nativeShadowSoft(uint slice,float3 coordinate,float2 texel,float2 depthSte
  return visibility/taps;
 }
 )" R"(
-float nativeShadowFilter(uint slice,float3 worldPosition,float3 positionDx,float3 positionDy,float rotation){
+float nativeShadowFilter(uint slice,float3 worldPosition,float3 positionDx,float3 positionDy,float rotation,out bool softFiltered){
+  softFiltered=false;
   float4 light=mul(shadowLight[slice],float4(worldPosition,1));float3 coordinate=light.xyz/light.w;
   if(abs(coordinate.x)>1||abs(coordinate.y)>1||coordinate.z<0||coordinate.z>1)return 1;
   // Directional maps are orthographic. Solve the rasterized receiver plane in
@@ -2756,14 +2757,16 @@ float nativeShadowFilter(uint slice,float3 worldPosition,float3 positionDx,float
    float2 start;sincos(rotation,start.y,start.x);
    const float4 found=nativeShadowBlockers(slice,coordinate,texel,depthStep,bias,side,search,
                                            shadowBias[5].z>1.5?16u:8u,start,foliage==1u);
-   // Fixed foliage filter: blockers that look cut-out (none found; grass
-   // within a metre of the receiver; crowns, needles and bare branches whose
-   // depths spread over more than half a metre in the search) take the
-   // fixed filter below. Solid casters stay soft.
+   // Fixed foliage filter: a lone blocker cannot establish depth spread.
+   // Fewer than two hits, blockers within a metre of the receiver, or depths
+   // spread over more than half a metre take the fixed filter below.
+   // Other blocker estimates stay soft.
    const float depthWorld=1/max(shadowBias[slice].y,1e-12);
-   const bool cutOut=foliage==2u&&(found.x==0||(coordinate.z-found.y/found.x)*depthWorld<1||(found.w-found.z)*depthWorld>.5);
-   [branch]if(!cutOut)
+   const bool cutOut=foliage==2u&&(found.x<2||(coordinate.z-found.y/found.x)*depthWorld<1||(found.w-found.z)*depthWorld>.5);
+   [branch]if(!cutOut){
+    softFiltered=true;
     return nativeShadowSoft(slice,coordinate,texel,depthStep,bias,side,minTexels,search,found,start,shear);
+   }
   }
   // Held-map correction for the fixed filters: their centre moves to where
   // the exact sun's ray crosses a blocker; the receiver plane stays anchored
@@ -2809,7 +2812,8 @@ float nativeShadowFilter(uint slice,float3 worldPosition,float3 positionDx,float
   }
   return visibility/(sum.x*sum.y);
 }
-float nativeShadowVisibility(float3 worldPosition,float3 positionDx,float3 positionDy,float2 pixel,bool temporal){
+float nativeShadowVisibility(float3 worldPosition,float3 positionDx,float3 positionDy,float2 pixel,bool temporal,out bool softFiltered){
+ softFiltered=false;
  uint slice=nativeShadowSlice(worldPosition);
  if(slice==5)return 1;
  if((shadowControl.x&(1u<<slice))==0)
@@ -2839,16 +2843,22 @@ float nativeShadowVisibility(float3 worldPosition,float3 positionDx,float3 posit
    }
   }
  }
- // No coarser map: the blended share is lit. The loop carries three
- // values (keeps the program's registers at the single-map count): the
- // maps still to filter (4 bits each, 5 ends), the share and the sum.
+ // No coarser map: the blended share is lit. One inlined filter serves
+ // both maps. Keep soft history if either nonzero share used noisy PCSS;
+ // a zero-weight map must not decide the blended result's history policy.
  float visibility=next<5?0:blend,weight=1-blend;
  uint maps=slice|(next<<4)|(5u<<8);
  [loop]for(uint current=slice;current<5;current=(maps>>=4)&15u){
-  visibility+=weight*nativeShadowFilter(current,worldPosition,positionDx,positionDy,rotation);
+  bool currentSoft;
+  visibility+=weight*nativeShadowFilter(current,worldPosition,positionDx,positionDy,rotation,currentSoft);
+  softFiltered=softFiltered||(weight>0&&currentSoft);
   weight=1-weight;
  }
  return visibility;
+}
+float nativeShadowVisibility(float3 worldPosition,float3 positionDx,float3 positionDy,float2 pixel,bool temporal){
+ bool softFiltered;
+ return nativeShadowVisibility(worldPosition,positionDx,positionDy,pixel,temporal,softFiltered);
 }
 #ifdef NATIVE_LOW
 )" R"(
@@ -4354,15 +4364,16 @@ float2 nativeShadowMaskCore(float4 position,out float2 unitRaw){
   }
   [branch]if(visibility>0)visibility=min(visibility,nativeRtCoverShadow(lookup,shadowDx,shadowDy,nativeShadowRotation(position.xy,false)));
 #else
+bool softFiltered=false;
 #ifdef NATIVE_LOW
   visibility=nativeLowShadowVisibility(lookup,shadowDx,shadowDy);
 #else
-  visibility=nativeShadowVisibility(lookup,shadowDx,shadowDy,position.xy,temporal);
+  visibility=nativeShadowVisibility(lookup,shadowDx,shadowDy,position.xy,temporal,softFiltered);
 #endif
   // The history reprojects the drawn surface, as nativePS did with its
   // interpolated world position: on tessellated terrain the rest position
   // lies off it, so its depth test dropped or misplaced the history.
-  [branch]if(visibility>=0&&temporal){
+  [branch]if(visibility>=0&&temporal&&(shadowJitter.z<.5||softFiltered)){
    float3 drawn=centre.drawn;
    visibility=nativeTemporalShadow(visibility,drawn,nativeTexelStep(px.valid,px.drawn,nx.valid,nx.drawn,drawn),
     nativeTexelStep(py.valid,py.drawn,ny.valid,ny.drawn,drawn));
@@ -5025,12 +5036,13 @@ NativePixelResult nativePS(NativeOutput i,bool frontFace:SV_IsFrontFace NATIVE_G
    float3 shadowLookup=i.shadowPosition;
    if((i.terrainVertexFlags&16)!=0&&dot(i.terrainSlope,i.terrainSlope)>1e-8&&dot(nativeWorldSunDirection.xyz,nativeWorldSunDirection.xyz)>1e-12)
     shadowLookup=terrainShadowLookup(i.shadowPosition,i.terrainSlope,normalize(nativeWorldSunDirection.xyz));
+bool softFiltered=false;
 #ifdef NATIVE_LOW
    visibility=nativeLowShadowVisibility(shadowLookup,shadowDx,shadowDy);
 #else
-   visibility=nativeShadowVisibility(shadowLookup,shadowDx,shadowDy,i.p.xy,temporal);
+   visibility=nativeShadowVisibility(shadowLookup,shadowDx,shadowDy,i.p.xy,temporal,softFiltered);
 #endif
-   if(visibility>=0&&temporal)
+   if(visibility>=0&&temporal&&(shadowJitter.z<.5||softFiltered))
     visibility=nativeTemporalShadow(visibility,i.worldPosition,positionDx,positionDy);
    filteredShadow=visibility;
   }

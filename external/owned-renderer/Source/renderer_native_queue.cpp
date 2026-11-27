@@ -1,3 +1,4 @@
+#include "visual_sun.h"
 // Renderer native queue (record building): owned textures, meshes, materials, poses, instance records, world ranges, queue_native*, checkpoints and discards.
 #include <intrin.h>
 #include "gltf_animation.h"
@@ -3872,22 +3873,9 @@ static bool native_lighting_is_valid(const NativeWorldLighting& lighting) noexce
  return true;
 }
 
-static std::array<float,4> fractional_visual_sun(double hour) noexcept {
- // Independently evaluated from the verified retail direction curve. The
- // shipped elevation is 60 degrees at noon, 30 at 04/20 and 75 at midnight.
- const double degrees = hour < 4.0 ? 75.0-11.25*hour :
-  hour > 20.0 ? 30.0+11.25*(hour-20.0) : 60.0-3.75*std::abs(hour-12.0);
- constexpr double pi = 3.14159265358979323846;
- const double elevation = degrees*(pi/180.0),azimuth = hour*(pi/12.0);
- const double horizontal = std::cos(elevation);
- // The bridge's lighting vector points toward the sun; the game's stored
- // vector travels away from it. This analytic direction is unit length.
- return {float(-std::cos(azimuth)*horizontal),float(-std::sin(azimuth)*horizontal),
-  float(std::sin(elevation)),0.f};
-}
 
 bool Renderer::set_native_world_lighting(
-    const NativeWorldLighting& lighting,const WorldEnvironment* captured) noexcept {
+    const NativeWorldLighting& lighting,const WorldEnvironment* captured,NativeWorldLighting* applied) noexcept {
  if(!native_lighting_is_valid(lighting))return false;
  // Cave zones (the game's own GMS_CAVE flag, read with the rest of the world
  // environment) take the renderer's cave profile; every consumer of the
@@ -3917,7 +3905,23 @@ bool Renderer::set_native_world_lighting(
  if(sun_clock_reason && sun_clock_reason != previous_sun_clock_reason)
   bridge_append_probe_event("visual_sun_unavailable",sun_clock_reason);
  previous_sun_clock_reason = sun_clock_reason;
- return apply_native_lighting(shaped);
+ if(!apply_native_lighting(shaped))return false;
+ if(applied)*applied=shaped;
+ return true;
+}
+
+// Called synchronously at WorldScene entry with its installed envelope, before
+// fitting or colour submission. Out-of-scope modes do not republish lighting.
+bool Renderer::prepare_current_shadow_lighting(NativeWorldLighting& lighting,
+ const WorldEnvironment& environment,bool& matching) noexcept {
+ matching=false;
+ if(!d3d12_||native_sun_filter_[0]<.5f||native_sun_filter_[1]!=2.f||
+    !environment.valid||!environment.visual_sun_supported||
+    !environment.visual_sun_time_valid||environment.cave)return true;
+ NativeWorldLighting prepared{};
+ if(!set_native_world_lighting(lighting,&environment,&prepared))return false;
+ lighting=prepared;matching=true;
+ return true;
 }
 
 bool Renderer::apply_native_lighting(const NativeWorldLighting& lighting) {
