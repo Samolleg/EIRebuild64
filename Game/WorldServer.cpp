@@ -3662,6 +3662,47 @@ bool CWorldServer::LoadNavigationScene(const char* mpr,const char* mob)
     FinishZoneLoading();
     return true;
 }
+void CWorldServer::RefreshPlacedHorseTextures()
+{
+    std::map<int,CMapObjectServer*> placed;
+    for (const auto& entry:mapObjects) {
+        auto* unit=dynamic_cast<CUnit*>(entry.second);
+        if (unit && unit->GetMaskName() && _stricmp(unit->GetMaskName(),"unanhoho")==0)
+            placed.emplace(unit->GetID(),static_cast<CMapObjectServer*>(unit->GetMapObjectSpecific()));
+    }
+    if (placed.empty()) return;
+    auto refresh=[&](const CString& name) {
+        if(name.IsEmpty())return;
+        CGameMOBFile file;
+        if(!file.Open(GetFullMobName(name),CFile::modeRead|CFile::shareDenyWrite|CFile::typeBinary))return;
+        file.ReadNextHeader();
+        CChunkTag section(&file);
+        while(!file.IsAllData()) {
+            section.ReadNextHeader();
+            if(section.GetID()==ID_OBJECTSECTION) {
+                CChunkTag record(&section);
+                while(!section.IsAllData()) {
+                    record.ReadNextHeader();
+                    if(record.GetID()==ID_UNIT) {
+                        CMEUnit definition;
+                        definition.SetParentChunk(&record);
+                        definition.ReadAllSubChunks();
+                        const auto found=placed.find(definition.p_nID);
+                        if(found!=placed.end() && definition.p_szTemplate.CompareNoCase("unanhoho")==0) {
+                            found->second->szPrimTexture=definition.p_szPrimTexture;
+                            found->second->szSecTexture=definition.p_szSecTexture;
+                        }
+                    }
+                    record.SkipLostData();
+                }
+            }
+            section.SkipLostData();
+        }
+    };
+    refresh(szMobFileName);
+    for(INT_PTR i=0;i<szLoadedMobs.GetSize();++i)
+        if(szLoadedMobs[i].CompareNoCase(szMobFileName)!=0)refresh(szLoadedMobs[i]);
+}
 BOOL CWorldServer::LoadMapObjects(LPCSTR pszMobName, bool bSkipScript, bool objectsOnly)
 {
     CGameMOBFile reader;

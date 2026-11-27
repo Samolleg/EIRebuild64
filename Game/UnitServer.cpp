@@ -1167,6 +1167,7 @@ void CUnitServer::L1ExecMove()
     // run state processing (here we determine if unit is running or not)
     if (!lpUnit->bMoving)
         return;
+    if(auto* rider=lpUnit->MountedRider())wishPose.bRun=rider->GetShowPose()==UP_RUN;
     if (currentPose.pose != UP_STAND || wishPose.pose != UP_STAND)
         return;
     if (currentPose.bRun && lpUnit->GetOwner() && !lpUnit->GetOwner()->bGod &&
@@ -3627,7 +3628,8 @@ bool CUnitServer::FindAttackPath(SUnitCommand &cmd, DWORD dwPositiveAck)
 void CUnitServer::ShowFoundPath(CAIFullRoute &move, const CPlot3D &ptDest, int pathType,
                                 int pathResult, float fpShowLeng)
 {
-    CPlayer *pPlayer = lpUnit->GetOwner();
+    auto* rider=lpUnit->MountedRider();
+    CPlayer *pPlayer = rider ? rider->GetOwner() : lpUnit->GetOwner();
     if (!pPlayer)
         return;
     CPlayer::EPathType type = (CPlayer::EPathType)pathType;
@@ -5754,6 +5756,33 @@ BOOL CUnitServer::ChangeWeapon(DWORD dwQWeaponIndex)
     return TRUE;
 }
 /////////////////////////////////////////////////////////////////////////////////////
+namespace {
+struct RidingExposure {float sound, sight;};
+bool RidingDetection(CUnit* unit,RidingExposure& exposure)
+{
+    auto* horse=unit->RiddenMount();
+    auto* rider=horse ? unit : unit->MountedRider();
+    if(!rider)return false;
+    if(!horse)horse=unit;
+    switch(rider->GetShowPose()) {
+    case UP_RUN: exposure={2.f,2.f};break;
+    case UP_CRAWL:case UP_LAY: exposure={.30f,.90f};break;
+    default: exposure={1.f,1.f};break;
+    }
+    if(!horse->IsMoving())exposure.sound=0;
+    return true;
+}
+}
+float CUnitServer::GetVisionDetect() const
+{
+    RidingExposure riding;
+    return RidingDetection(lpUnit,riding)?riding.sight:rpgUnitStats.percepts[RPGS_SIGHT].fpEffectiveValue*fpModVision;
+}
+float CUnitServer::GetFSSoundDetect() const
+{
+    RidingExposure riding;
+    return RidingDetection(lpUnit,riding)?riding.sound:rpgUnitStats.percepts[RPGS_HEARING].fpEffectiveValue*fpModSound;
+}
 void CUnitServer::RecalcAIParams()
 {
     CWorldServer *pWorld = (CWorldServer *)GetWorld();
@@ -6372,6 +6401,7 @@ void CUnitServer::CmdMoveTo(const CPlot3D &ptDest, bool bRun, bool bGroupCmd, fl
     nextCommand.ptTarget.z = fpMaxPathDist;
 
     CPlayer *pPlayer = lpUnit->GetOwner();
+    if (auto* rider=lpUnit->MountedRider()) pPlayer=rider->GetOwner();
     if (pPlayer && ptDest.z != -1313)
     {
         if (!pWS->IsCombatPause())
@@ -6570,6 +6600,8 @@ void CUnitServer::CmdNewPose(EUnitPose pose)
                            lpUnit->GetCPX(), lpUnit->GetCPY());
     nBoredCounter = 0;
     lpUnit->wishPose = pose;
+    if(auto* horse=lpUnit->RiddenMount())
+        static_cast<CUnitServer*>(horse->GetUnitSpecific())->NotifyModSpeedChanged();
     if (LcCanChangePose(pose))
     {
         if (pose != UP_RUN || rpgUnitStats.CanRun(true) == ECR_CAN_RUN)

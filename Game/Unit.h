@@ -195,6 +195,8 @@ class CUnit : public CMapObject
 public:
     int ridingPassenger = -1;
     bool ridingRestored = false;
+    CUnit* MountedRider();
+    CUnit* RiddenMount();
     static constexpr float rideMountTicks=50.f, rideDismountTicks=43.f;
     int rideFlank=1;
     bool RidingTransition(double now) const {

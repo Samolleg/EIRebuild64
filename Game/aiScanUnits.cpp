@@ -362,6 +362,7 @@ void CAIMarkManager::ProduceSoundFootstep(CUnitServer *pUnitSrc, float fpStrengt
     float fpSense;
     CUnit *pSrc = pUnitSrc->GetUnit();
     const CPlot3D &soundPos = pSoundPos ? *pSoundPos : pSrc->GetCP();
+    if(auto* rider=pSrc->MountedRider())pSrc=rider;
 
     pAIMap->GetUnitsNear(soundPos, heard, 50);
     pos = heard.GetHeadPosition();

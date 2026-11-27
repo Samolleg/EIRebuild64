@@ -1016,11 +1016,23 @@ EUnitCastFailure CUnit::CheckIsWandPossible(DWORD dwQItemIndex, CPlot3D &ptTarge
     return UCS_OK;
 }
 /////////////////////////////////////////////////////////////////////////////////////
+CUnit* CUnit::MountedRider()
+{
+    auto* rider=ridingPassenger>=0 && GetWorld() ? GetWorld()->GetUnit(ridingPassenger) : nullptr;
+    return rider && rider->ridingHorse==GetID() ? rider : nullptr;
+}
+CUnit* CUnit::RiddenMount()
+{
+    auto* horse=ridingHorse>=0 && GetWorld() ? GetWorld()->GetUnit(ridingHorse) : nullptr;
+    return horse && horse->ridingPassenger==GetID() ? horse : nullptr;
+}
 void CUnit::GetSpeeds(float &fpMoveSpeed, float &fpRotateSpeed)
 {
     fpMoveSpeed = rpgUserUnitStats.cMove * 10.0f / 255.0f;
     fpRotateSpeed = fpMoveSpeed;
-    switch (currentPose)
+    auto* rider=MountedRider();
+    const auto gait=rider?rider->GetShowPose():currentPose;
+    switch (rider && gait!=UP_RUN ? UP_STAND : gait)
     {
     case UP_LAY: // ползти
         fpMoveSpeed *= rpgUserUnitStats.cSpeeds[3] * FP_RPG_MAX_SPEED / 255.0f;
@@ -1040,6 +1052,7 @@ void CUnit::GetSpeeds(float &fpMoveSpeed, float &fpRotateSpeed)
         fpRotateSpeed = fpMoveSpeed;
         break;
     }
+    if (rider && (gait==UP_LAY || gait==UP_CRAWL)) fpMoveSpeed*=.5f;
     if(auto*mod=ModRuntime::Current()){float factor=mod->CrippledSpeed(*this),fear=mod->DeathFearSpeedFactor(*this);if(fear<factor)factor=fear;auto speeds=ModAttackTiming::ScaleMovement({fpMoveSpeed,fpRotateSpeed},factor);fpMoveSpeed=speeds.move;fpRotateSpeed=speeds.rotate;}
     fpRotateSpeed *= theAIGeneralSettings.fpRotateSpeedMult;
     if(ModFinalGolem::RamSpeed(*this,fpMoveSpeed))return;

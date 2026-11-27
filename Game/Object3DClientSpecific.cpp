@@ -1081,6 +1081,7 @@ bool CObject3DClientSpecific::PrepareOwnedResources(bool publishAppearance)
         const auto* action=animation?animation->GetCurrentAnimation():nullptr;
         auto clip=base->view.clip;
         bool pairedTransfer=false;
+        bool distanceTimed=false;
         const auto* world=dynamic_cast<const CWorldBase*>(GetWorld());
         float seconds=world?float(world->GetSegmentTimeCounter())*(DW_SEGMENT_TIME/1000.f):0.f;
         if(action && action->dwAnimationLength){
@@ -1112,6 +1113,26 @@ bool CObject3DClientSpecific::PrepareOwnedResources(bool publishAppearance)
                     }
                 }
             }
+            if (!pairedTransfer && horse && horse->IsMoving() && horse->GetMaskName() &&
+                _stricmp(horse->GetMaskName(), "unanhoho") == 0) {
+                const bool gallop = (held ? rider : horse)->GetShowPose() == UP_RUN;
+                const auto gait = base->clip_lengths.find(gallop ? "crun" : "cwalk");
+                if (gait != base->clip_lengths.end()) {
+                    const auto position = object->GetCP();
+                    // Grounded hoof travel per cycle of the installed Warhorse Lite clips (metres).
+                    const float stride = gallop ? 3.0f : 1.447f;
+                    if (trackingStride) {
+                        const float travel = std::hypot(position.x - previousStridePosition.x,
+                            position.y - previousStridePosition.y);
+                        if (travel < stride) stridePhase = std::fmod(stridePhase + travel / stride, 1.f);
+                    } else stridePhase = 0.f;
+                    previousStridePosition = position;
+                    clip = gait->first;
+                    seconds = stridePhase * gait->second;
+                    distanceTimed = true;
+                }
+            }
+            trackingStride = distanceTimed;
             if (held) {
                 const auto heldClip="tack_held_"+clip;
                 if (base->clip_lengths.count(heldClip)) clip=heldClip;
@@ -1125,7 +1146,7 @@ bool CObject3DClientSpecific::PrepareOwnedResources(bool publishAppearance)
 #endif
         const auto duration=base->clip_lengths.find(clip);
         if(duration!=base->clip_lengths.end() && duration->second>0){
-            if (!pairedTransfer) {
+            if (!pairedTransfer && !distanceTimed) {
                 if(!action || !action->IsUnique())seconds=std::fmod(seconds,duration->second);
                 seconds=std::floor(seconds*30.f)/30.f;
             }
@@ -1134,7 +1155,10 @@ bool CObject3DClientSpecific::PrepareOwnedResources(bool publishAppearance)
                 ownedAppearanceAttempted=false;
             }
         }
-    }else nativePose.reset();
+    } else if (publishAppearance) {
+        nativePose.reset();
+        trackingStride = false;
+    }
     if (publishAppearance && !ownedAppearanceAttempted)
     {
         ownedAppearanceAttempted = true;

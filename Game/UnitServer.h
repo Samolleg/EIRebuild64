@@ -825,10 +825,7 @@ public:
     {
         return rpgUnitStats.senses[RPGS_SIGHT].fpEffectiveValue * fpSModVision;
     }
-    float GetVisionDetect() const
-    {
-        return rpgUnitStats.percepts[RPGS_SIGHT].fpEffectiveValue * fpModVision;
-    }
+    float GetVisionDetect() const;
     float GetLifeSense() const { return rpgUnitStats.senses[RPGS_SENSELIFE].fpEffectiveValue; }
     float GetLifeDetect() const { return rpgUnitStats.percepts[RPGS_SENSELIFE].fpEffectiveValue; }
     float GetVisionArc() const { return rpgUnitStats.fpVisionArc; }
@@ -848,10 +845,7 @@ public:
     {
         return rpgUnitStats.senses[RPGS_HEARING].fpEffectiveValue * fpSModSound;
     }
-    float GetFSSoundDetect() const
-    {
-        return rpgUnitStats.percepts[RPGS_HEARING].fpEffectiveValue * fpModSound;
-    }
+    float GetFSSoundDetect() const;
     float GetFSSoundNativeDetect() const
     {
         return rpgUnitStats.percepts[RPGS_HEARING].fpEffectiveValue;

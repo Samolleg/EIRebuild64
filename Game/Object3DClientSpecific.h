@@ -88,6 +88,9 @@ private:
     } neutralPose;
     std::shared_ptr<const owned::environment::Asset> nativePose;
     owned::gltf::RidingIdleState nativeRidingIdle;
+    CPlot3D previousStridePosition;
+    float stridePhase = 0;
+    bool trackingStride = false;
     bool ownedAppearanceAttempted = false;
     std::uint64_t ownedAppearanceRevision = 0;
     //

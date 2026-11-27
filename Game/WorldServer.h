@@ -110,6 +110,7 @@ private:
     BOOL LoadMapObjects(LPCSTR pszMobName, bool bSkipScript, bool objectsOnly = false);
     BOOL LoadMainMob(const char *pszMprName, const char *pszMobName, CMemorySave &graphChunk,
                      bool bStaticOnly, bool skipScripts = false);
+    void RefreshPlacedHorseTextures();
     void StartZoneLoading();
     void FinishZoneLoading();
     void SetChangedFlags(DWORD dwFlags);

@@ -710,10 +710,10 @@ void CI3DScreenMission::AllMove(CPlot3D plot, bool bSwarm, bool bRun)
             if (rider && rider->RidingTransition(theWorld.GetRenderTimeSegments())) continue;
             auto* horse = rider && rider->ridingHorse >= 0 ? theWorldServer.GetUnit(rider->ridingHorse) : nullptr;
             if (Rideable(horse) && RidingDriver(horse)) {
-                const auto delta=plot-horse->GetCP();
-                const bool gallop=bRun || delta.x*delta.x+delta.y*delta.y>=16.f;
+                const auto stance=rider->GetShowPose();
+                const bool gallop=stance==UP_RUN;
                 RidingDriver(horse)->CmdMoveTo(plot,gallop);
-                GameJournal::Event("RIDING","move","horse=%d gait=%s x=%.2f y=%.2f",horse->GetID(),gallop?"gallop":"walk",plot.x,plot.y);
+                GameJournal::Event("RIDING","move","horse=%d gait=%s x=%.2f y=%.2f",horse->GetID(),gallop?"gallop":(stance==UP_LAY || stance==UP_CRAWL)?"slow_walk":"walk",plot.x,plot.y);
                 continue;
             }
             units.Add(pUnits[i]);
