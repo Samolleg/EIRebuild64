@@ -978,7 +978,7 @@ double shadow_clip_depth(const std::array<Scalar, 16>& matrix,
 
 bool finish_shadow_receiver_xy(RetainedDirectionalSlice& slice,
     const std::array<double, 2>& center, double half_extent,
-    std::uint32_t map_side) noexcept {
+    std::uint32_t map_side, const std::array<double,2>& origin={}) noexcept {
     if (!slice.receivers_in_light.valid) return true;
     auto& bounds = slice.receivers_in_light;
     double magnitude = 1;
@@ -1001,7 +1001,7 @@ bool finish_shadow_receiver_xy(RetainedDirectionalSlice& slice,
     if (!finite_value(slice.light_radius) || slice.light_radius <= 0) return false;
     const double texel = 2*radius/map_side;
     for (unsigned axis = 0; axis < 2; ++axis) {
-        slice.light_center[axis] = static_cast<float>(std::floor(center[axis]/texel+.5)*texel);
+        slice.light_center[axis] = static_cast<float>(origin[axis]+std::floor((center[axis]-origin[axis])/texel+.5)*texel);
         bounds.minimum[axis] = next_float(static_cast<float>(bounds.minimum[axis]-3*texel), -INFINITY);
         bounds.maximum[axis] = next_float(static_cast<float>(bounds.maximum[axis]+3*texel), INFINITY);
         if (double(slice.light_center[axis])-radius > bounds.minimum[axis] ||
@@ -1027,7 +1027,7 @@ bool fit_shadow_receiver_xy(RetainedDirectionalSlice& slice,
 bool fit_shadow_camera_slice_xy(RetainedDirectionalSlice& slice,
     const ShadowFrustum& section,
     const std::array<std::array<float, 3>, 3>& light_axes,
-    std::uint32_t map_side) noexcept {
+    std::uint32_t map_side,float anchor_z) noexcept {
     if (!slice.receivers_in_light.valid) return true;
     ShadowPoint near_center{}, far_center{}, delta{};
     for (unsigned axis = 0; axis < 3; ++axis) {
@@ -1064,8 +1064,17 @@ bool fit_shadow_camera_slice_xy(RetainedDirectionalSlice& slice,
     for (unsigned axis = 0; axis < 2; ++axis)
         for (unsigned component = 0; component < 3; ++component)
             light_center[axis] += double(light_axes[axis][component])*center[component];
-    return finish_shadow_receiver_xy(slice, light_center,
-        std::sqrt(radius_squared),map_side);
+    std::array<double,2> origin{};
+    double extent=std::sqrt(radius_squared);
+    for(unsigned axis=0;axis<2;++axis) {
+        if(std::isfinite(anchor_z))origin[axis]=light_axes[axis][2]*double(anchor_z);
+        for(const auto& corner:section.corners) {
+            double offset=0;
+            for(unsigned k=0;k<3;++k)offset+=double(light_axes[axis][k])*(corner[k]-center[k]);
+            extent=std::max(extent,std::abs(offset));
+        }
+    }
+    return finish_shadow_receiver_xy(slice,light_center,extent,map_side,origin);
 }
 
 bool base_terrain_quality_anchor(const std::array<double,16>& camera_matrix,
@@ -1614,6 +1623,12 @@ bool build_retained_directional_coverage(
     }
     result.light_axes[1] = {ray[1]*u[2]-ray[2]*u[1], ray[2]*u[0]-ray[0]*u[2],
                            ray[0]*u[1]-ray[1]*u[0]};
+    // Project along the caster ray onto the reference ground plane. A fixed
+    // point on that plane stays on the same subtexel as daylight advances.
+    if(std::abs(ray[2])>=0.49f) {
+        result.light_axes[0]={1,0,-ray[0]/ray[2]};
+        result.light_axes[1]={0,-1,ray[1]/ray[2]};
+    }
     result.world_to_clip = world_to_clip;
     ShadowFrustum camera{};
     if (!shadow_frustum(camera_matrix, camera)) return false;
@@ -1810,7 +1825,7 @@ bool build_retained_directional_coverage(
                                 static_cast<float>(point[component]);
                     include_world_point(quality.receivers_in_light,projected);
                 }
-                if(!fit_shadow_camera_slice_xy(quality,section,result.light_axes,map_side)) return false;
+                if(!fit_shadow_camera_slice_xy(quality,section,result.light_axes,map_side,camera_anchor_z)) return false;
                 // Close cascades follow camera depth, so an approach can
                 // only advance from C2 to C1 to C0. The fitted light center
                 // covers the entire depth band independently of terrain rays.
@@ -1975,7 +1990,7 @@ bool build_retained_directional_coverage(
             });
         }
         if (perspective && index < 3) {
-            if (!fit_shadow_camera_slice_xy(slice, section, result.light_axes,map_side)) return false;
+            if (!fit_shadow_camera_slice_xy(slice, section, result.light_axes,map_side,camera_anchor_z)) return false;
         } else if (!fit_shadow_receiver_xy(slice,map_side)) return false;
     }
     result.valid = true;
