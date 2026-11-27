@@ -284,34 +284,31 @@ void CAnimationNode::GetComplection(float &fpStrength, float &fpGrace, float &fp
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // load complex data for animation node bone and recalc it with current complection
-void CAnimationNode::LoadBone(LPBYTE &lpData)
+bool CAnimationNode::LoadBone(const BYTE* data, DWORD size)
 {
-    CPlot3D temp[2];
-    CPlot3D *plots = reinterpret_cast<CPlot3D *>(lpData);
-    bone = plots[0] + strength * (plots[1] - plots[0]);
-    temp[1] = plots[2] + strength * (plots[3] - plots[2]);
-    bone += grace * (temp[1] - bone);
-    plots = reinterpret_cast<CPlot3D *>(lpData + 4 * sizeof(CPlot3D));
-    temp[0] = plots[0] + strength * (plots[1] - plots[0]);
-    temp[1] = plots[2] + strength * (plots[3] - plots[2]);
-    temp[0] += grace * (temp[1] - temp[0]);
-    bone += tall * (temp[0] - bone);
-    //
-    lpData += sizeof(CPlot3D) * 8;
-}
-/////////////////////////////////////////////////////////////////////////////////////
-void CAnimationNode::LoadOldBone(LPBYTE &lpData)
-{
-    CPlot3D *plots = (CPlot3D *)lpData;
-    CPlot3D plot;
-    //
-    bone = plots[0] + strength * (plots[1] - plots[0]);
-    bone += grace * (plots[2] - bone);
-    plot = plots[3] + strength * (plots[4] - plots[3]);
-    plot += grace * (plots[5] - plot);
-    bone += tall * (plot - bone);
-    //
-    lpData += sizeof(CPlot3D) * 6;
+    static_assert(sizeof(CPlot3D) == 12, "BON stores three floats per endpoint");
+    CPlot3D plots[8];
+    if (!data || (size != sizeof(plots[0]) && size != 6 * sizeof(plots[0]) && size != sizeof(plots)))
+    {
+        bone = VNULL;
+        return false;
+    }
+    memcpy(plots, data, size);
+    bone = plots[0];
+    if (size == sizeof(plots[0]))
+        return true;
+
+    // Six-endpoint BONs share the high-grace endpoint for both strength values.
+    const bool legacy = size == 6 * sizeof(plots[0]);
+    const CPlot3D* upper = plots + (legacy ? 3 : 4);
+    bone += strength * (plots[1] - plots[0]);
+    const CPlot3D lowGraceEnd = legacy ? plots[2] : plots[2] + strength * (plots[3] - plots[2]);
+    bone += grace * (lowGraceEnd - bone);
+    CPlot3D high = upper[0] + strength * (upper[1] - upper[0]);
+    const CPlot3D highGraceEnd = legacy ? upper[2] : upper[2] + strength * (upper[3] - upper[2]);
+    high += grace * (highGraceEnd - high);
+    bone += tall * (high - bone);
+    return true;
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // BOOL CAnimationNode::AddChildNode( CAnimationNode* lpNewNode )
