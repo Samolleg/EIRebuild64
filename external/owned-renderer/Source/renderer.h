@@ -5824,6 +5824,7 @@ private:
     ComPtr<ID3D11Buffer> shadow_history_constants_;
     ComPtr<ID3D11SamplerState> shadow_history_sampler_;
     std::array<float,16> shadow_history_previous_clip_{};
+    std::array<float,4> shadow_history_previous_sun_{};
     std::uint64_t shadow_history_previous_epoch_=0;
     std::uint64_t shadow_history_previous_frame_=UINT64_MAX;
     std::uint64_t shadow_history_current_frame_=UINT64_MAX;

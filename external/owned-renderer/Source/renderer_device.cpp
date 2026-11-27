@@ -2236,7 +2236,8 @@ bool Renderer::prepare_shadow_history() noexcept {
  constants.settings={float(history_width),float(history_height),.8f,can_reuse?1.f:0.f};
  // Soft-shadow disks rotate per frame only while history can integrate them.
  const float phase=float(native_frame_index_%64u);
- if(can_reuse)constants.jitter={phase*7.f,phase*13.f,0,0};
+ if(can_reuse)constants.jitter={phase*7.f,phase*13.f,
+  native_sun_filter_[1]==2.f&&native_world_lighting_.sunlight_direction!=shadow_history_previous_sun_?1.f:0.f,0};
  if(can_reuse&&d3d12_)d3d12_->count("sun-shadow history reused");
  return upload(constants);
 }
@@ -2269,6 +2270,7 @@ void Renderer::commit_shadow_history() noexcept {
  // The history was drawn with this frame's DLSS viewport jitter: it reprojects
  // into the jittered image (zero jitter when DLSS is off).
  shadow_history_previous_clip_=dlss_jittered_clip(clip,dlss_jitter_[0],dlss_jitter_[1],history_width,history_height);
+ shadow_history_previous_sun_=native_world_lighting_.sunlight_direction;
  shadow_history_previous_epoch_=shadow_history_current_epoch_;
  shadow_history_previous_frame_=native_frame_index_;
  shadow_history_previous_index_=shadow_history_current_index_;
