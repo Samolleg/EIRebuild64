@@ -89,7 +89,9 @@ struct OwnedVisualWorldFrame {
     std::uint8_t observed_sun_mask=0,observed_retained_mask=0,observed_scroll_mask=0;
     std::vector<std::int32_t> shadow_time_active_visuals;
     NativeShadowFrame shadows;
+    bool matching_current_sun = false;
     RetainedDirectionalCoverage coverage{};
+    NativeShadowPhaseReference phase_reference{};
     std::uint64_t serial = 0;
     std::uint64_t considered = 0, eligible = 0, submitted_parts = 0;
     std::uint64_t shadow_considered = 0, shadow_eligible = 0, shadow_submitted = 0;
@@ -230,6 +232,7 @@ struct GroundCoverFootprintSnapshot {
 // shadows, values and submissions from that copy alone (the scene thread with
 // the render_thread option, else straight after the head).
 struct OwnedShadowInputs {
+    bool matching_current_sun = false; // host-prepared immutable world invocation policy
     NativeFrameState pass{};
     double time = 0;
     std::uint32_t flags = 0;

@@ -1774,6 +1774,7 @@ bool execute_owned_shadow_pass(bool terrain_enabled,
             }
             if(!build_retained_shadow_frame(frame.coverage,casters,shadows,statics))throw "owned_shadow_projection";
             shadows.world_epoch=bridge_current_world_epoch();
+            shadows.matching_current_sun=frame.matching_current_sun;
         }
         CityRetainedOwnerGuard registration_timing(CityRetainedOwner::depth_registration);
         std::uint8_t dirty=0;
@@ -2643,11 +2644,11 @@ ShadowInputDecision decide_owned_shadow_input(RetainedStaticScene& scene,
     const RetainedShadowInputDomain* cached,const RetainedShadowSourceChanges& changes,
     const RetainedVisualFrame& values,const std::array<float,16>& world_to_clip,
     const NativeWorldLighting& lighting,std::uint32_t flags,bool draw_undetected,
-    bool terrain_enabled,std::uint64_t source_revision) {
+    bool terrain_enabled,std::uint64_t source_revision,bool matching_current_sun) {
     observe_shadow_reuse_inputs(cached,changes,world_to_clip,lighting,flags,draw_undetected,terrain_enabled,source_revision);
     const auto note=[](ShadowInputDifference cause){++g_shadow_reuse_inputs.counts[static_cast<unsigned>(cause)];};
     ShadowInputDecision result;
-    if(!cached || cached->world_to_clip!=world_to_clip ||
+    if(!cached || cached->frame.matching_current_sun!=matching_current_sun || cached->world_to_clip!=world_to_clip ||
        !same_shadow_depth_lighting(cached->lighting,lighting) ||
        cached->class_flags!=flags || cached->draw_undetected!=draw_undetected ||
        !reusable_shadow_terrain(*cached,terrain_enabled,false) || changes.full ||
@@ -2727,8 +2728,21 @@ bool prepare_owned_world_shadows_from(OwnedShadowInputs in,
         const auto flags=in.flags;
         const bool draw_undetected=in.draw_undetected;
         const auto shadow_source_revision=in.shadow_source_revision;
-        const auto shadow_lighting=shadow_projection_lighting(
-            g_native_world_lighting_frame.lighting);
+        frame.matching_current_sun=in.matching_current_sun;
+        frame.phase_reference={};
+        if(in.matching_current_sun&&g_native_sink_shadow_cull_projection){
+            NativeShadowCullProjection previous{};
+            g_native_sink_shadow_cull_projection(g_native_sink_context,previous);
+            if(previous.matching_current_sun&&previous.world_epoch==bridge_current_world_epoch()){
+                frame.phase_reference.world_to_light=previous.world_to_light;
+                frame.phase_reference.world_epoch=previous.world_epoch;
+                frame.phase_reference.side=previous.side;
+                frame.phase_reference.valid_mask=previous.valid_mask;
+                frame.phase_reference.matching_current_sun=true;
+            }
+        }
+        const auto shadow_lighting=in.matching_current_sun?g_native_world_lighting_frame.lighting:
+            shadow_projection_lighting(g_native_world_lighting_frame.lighting);
         auto& shadow_scene=retained_visual_scene();
         const bool terrain_enabled=(flags&0x100u)!=0 && g_owned_terrain_frame.source_values.terrain;
         std::vector<NativeWorldBounds> receivers;
@@ -2749,7 +2763,7 @@ bool prepare_owned_world_shadows_from(OwnedShadowInputs in,
         point_lighting_timing.finish();
         auto decision=decide_owned_shadow_input(shadow_scene,cached.get(),changes,*values,
             world_to_clip,shadow_lighting,flags,draw_undetected,
-            terrain_enabled,shadow_source_revision);
+            terrain_enabled,shadow_source_revision,in.matching_current_sun);
         decision_timing.finish();
         if(decision.route==ShadowInputRoute::reuse) {
             if(owned_shadow_current_revision(shadow_scene)==cached->source_revision) {

@@ -284,6 +284,11 @@ bool E1RunOwnedVisualFrame(owned::Renderer& renderer, const owned::FixedState& s
     inputs.lighting.sunlight_diffuse = host.sunDiffuse;
     inputs.lighting.sunlight_direction = host.sunDirection;
     inputs.lighting_valid = host.lightingValid;
+    owned::WorldEnvironment environment;
+    owned::bridge_read_world_environment(environment);
+    if (inputs.lighting_valid && !renderer.prepare_current_shadow_lighting(
+            inputs.lighting, environment, inputs.matching_current_sun))
+        return false;
     inputs.fog = [](const void* context, const float* position) -> BYTE {
         const auto& frame = *static_cast<const E1VisualInputs*>(context);
         return frame.fog ? frame.fog(frame.fogInputs, position) : 0;

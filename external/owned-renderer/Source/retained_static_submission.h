@@ -11,6 +11,8 @@
 
 namespace owned {
 
+struct NativeShadowPhaseReference;
+
 struct RetainedPreparedNode {
     std::shared_ptr<const environment::Material> environment_material;
     const FigureCpuAsset* figure = nullptr;
@@ -165,7 +167,8 @@ bool build_retained_directional_coverage(
     std::uint8_t close_cascades = 3,
     std::uint64_t base_terrain_generation = 0, // base_terrain's source generation
     float close_range = 80,                    // close band length (m) past its near start
-    float camera_anchor_z = NAN) noexcept;     // the game camera's anchor height; NaN unknown
+    float camera_anchor_z = NAN,
+    const NativeShadowPhaseReference* previous_phase = nullptr) noexcept;     // the game camera's anchor height; NaN unknown
 NativeContribution retained_world_contribution(const NativeWorldBounds& bounds,
     bool casts_shadow, const RetainedDirectionalCoverage& coverage,
     NativeWorldBounds* caster_in_light = nullptr,

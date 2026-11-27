@@ -1319,7 +1319,8 @@ public:
     void end_world_map_marker();
     void draw_world_map_markers();
     // Scene thread: the same, with the world environment read on the game thread.
-    bool set_native_world_lighting(const NativeWorldLighting& lighting,const WorldEnvironment* environment) noexcept;
+    bool set_native_world_lighting(const NativeWorldLighting& lighting,const WorldEnvironment* environment,NativeWorldLighting* applied=nullptr) noexcept;
+    bool prepare_current_shadow_lighting(NativeWorldLighting& lighting,const WorldEnvironment& environment,bool& matching) noexcept;
     // A portrait owns its light only after the world is composited. Its final
     // flush precedes restoring the exact prepared light, without cave reshaping.
     class PortraitLightingScope {

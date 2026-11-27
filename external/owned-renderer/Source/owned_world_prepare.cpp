@@ -263,11 +263,15 @@ bool prepare_owned_visual_values(std::shared_ptr<const RetainedVisualFrame> valu
     auto prepared_storage=std::move(frame.prepared);
     if(prepared_storage.empty())prepared_storage.swap(g_owned_visual_prepared_spare);
     const auto shadow_source_diagnostic=frame.shadow_source_diagnostic;
+    const bool matching_current_sun=frame.matching_current_sun;
+    const auto phase_reference=frame.phase_reference;
     auto shadow_storage=std::move(frame.shadows);
     clear_owned_visual_world_frame(frame);   // the scratch vectors keep their capacity
     if(!values)return false;
     frame.prepared=std::move(prepared_storage);
     frame.shadow_source_diagnostic=shadow_source_diagnostic;
+    frame.matching_current_sun=matching_current_sun;
+    frame.phase_reference=phase_reference;
     frame.shadows=std::move(shadow_storage);
     frame.active = true;
     frame.shadows_enabled = shadows_enabled;
@@ -558,7 +562,7 @@ bool prepare_owned_visual_values(std::shared_ptr<const RetainedVisualFrame> valu
         else if (!build_retained_directional_coverage(world_to_clip,lighting,receivers,
             frame.coverage,base_source,base_transform,g_owned_shadow_settings.map_side,
             g_owned_shadow_settings.close_cascades,base_generation,g_owned_shadow_settings.close_range,
-            frame.camera_anchor_z)) {
+            frame.camera_anchor_z,frame.phase_reference.valid_mask?&frame.phase_reference:nullptr)) {
             reject_owned_visual("coverage","receiver_coverage");
             report_object_plan_failure("owned_scene_receiver_coverage");
             return false;

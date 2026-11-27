@@ -976,9 +976,39 @@ double shadow_clip_depth(const std::array<Scalar, 16>& matrix,
     return z/w;
 }
 
+// Per-fit context only: previous actual GPU-map values plus a captured view point.
+struct ShadowPhaseFit {
+ const NativeShadowPhaseReference* previous=nullptr;
+ unsigned slice=5;
+ ShadowPoint anchor{};
+ const std::array<std::array<float,3>,3>* axes=nullptr;
+};
+std::array<double,2> shadow_phase_origin(double texel,const ShadowPhaseFit& fit) noexcept {
+ std::array<double,2> origin{};
+ const auto* old=fit.previous;
+ if(!old||!fit.axes||fit.slice>=5||!old->matching_current_sun||
+    !(old->valid_mask&(1u<<fit.slice))||old->side<16||!finite_value(texel)||texel<=0)return origin;
+ const auto& m=old->world_to_light[fit.slice];
+ for(float v:m)if(!finite_value(v))return origin;
+ for(double v:fit.anchor)if(!finite_value(v))return origin;
+ if(m[12]!=0||m[13]!=0||m[14]!=0||m[15]!=1)return origin;
+ for(unsigned row=0;row<3;++row){
+  double length2=0;for(unsigned k=0;k<3;++k)length2+=double(m[row*4+k])*m[row*4+k];
+  if(!finite_value(length2)||length2<=0)return {};
+ }
+ for(unsigned axis=0;axis<2;++axis){
+  double clip=m[axis*4+3],projected=0;
+  for(unsigned k=0;k<3;++k){clip+=double(m[axis*4+k])*fit.anchor[k];projected+=double((*fit.axes)[axis][k])*fit.anchor[k];}
+  const double u=clip*(double(old->side)*.5);
+  const double phi=u-std::floor(u);
+  origin[axis]=projected-texel*phi;
+  if(!finite_value(origin[axis]))return {};
+ }
+ return origin;
+}
 bool finish_shadow_receiver_xy(RetainedDirectionalSlice& slice,
     const std::array<double, 2>& center, double half_extent,
-    std::uint32_t map_side) noexcept {
+    std::uint32_t map_side,const ShadowPhaseFit& phase={}) noexcept {
     if (!slice.receivers_in_light.valid) return true;
     auto& bounds = slice.receivers_in_light;
     double magnitude = 1;
@@ -1000,8 +1030,9 @@ bool finish_shadow_receiver_xy(RetainedDirectionalSlice& slice,
     slice.light_radius = static_cast<float>(radius);
     if (!finite_value(slice.light_radius) || slice.light_radius <= 0) return false;
     const double texel = 2*radius/map_side;
+    const auto origin=shadow_phase_origin(texel,phase);
     for (unsigned axis = 0; axis < 2; ++axis) {
-        slice.light_center[axis] = static_cast<float>(std::floor(center[axis]/texel+.5)*texel);
+        slice.light_center[axis] = static_cast<float>(origin[axis]+std::floor((center[axis]-origin[axis])/texel+.5)*texel);
         bounds.minimum[axis] = next_float(static_cast<float>(bounds.minimum[axis]-3*texel), -INFINITY);
         bounds.maximum[axis] = next_float(static_cast<float>(bounds.maximum[axis]+3*texel), INFINITY);
         if (double(slice.light_center[axis])-radius > bounds.minimum[axis] ||
@@ -1011,7 +1042,7 @@ bool finish_shadow_receiver_xy(RetainedDirectionalSlice& slice,
 }
 
 bool fit_shadow_receiver_xy(RetainedDirectionalSlice& slice,
-    std::uint32_t map_side,double minimum_half_extent=0) noexcept {
+    std::uint32_t map_side,double minimum_half_extent=0,const ShadowPhaseFit& phase={}) noexcept {
     if (!slice.receivers_in_light.valid) return true;
     std::array<double, 2> center{};
     double half_extent = 0;
@@ -1021,13 +1052,14 @@ bool fit_shadow_receiver_xy(RetainedDirectionalSlice& slice,
         half_extent = (std::max)(half_extent, (double(bounds.maximum[axis])-bounds.minimum[axis])*.5);
     }
     return finish_shadow_receiver_xy(slice, center,
-        (std::max)(half_extent,minimum_half_extent),map_side);
+        (std::max)(half_extent,minimum_half_extent),map_side,phase);
 }
 
 bool fit_shadow_camera_slice_xy(RetainedDirectionalSlice& slice,
     const ShadowFrustum& section,
     const std::array<std::array<float, 3>, 3>& light_axes,
-    std::uint32_t map_side) noexcept {
+    std::uint32_t map_side,const NativeShadowPhaseReference* previous=nullptr,unsigned index=5,
+    ShadowPoint* view_anchor=nullptr) noexcept {
     if (!slice.receivers_in_light.valid) return true;
     ShadowPoint near_center{}, far_center{}, delta{};
     for (unsigned axis = 0; axis < 3; ++axis) {
@@ -1064,8 +1096,9 @@ bool fit_shadow_camera_slice_xy(RetainedDirectionalSlice& slice,
     for (unsigned axis = 0; axis < 2; ++axis)
         for (unsigned component = 0; component < 3; ++component)
             light_center[axis] += double(light_axes[axis][component])*center[component];
+    if(view_anchor)*view_anchor=center;
     return finish_shadow_receiver_xy(slice, light_center,
-        std::sqrt(radius_squared),map_side);
+        std::sqrt(radius_squared),map_side,{previous,index,center,&light_axes});
 }
 
 bool base_terrain_quality_anchor(const std::array<double,16>& camera_matrix,
@@ -1567,8 +1600,9 @@ bool build_retained_directional_coverage(
     RetainedDirectionalCoverage& result, const TerrainCpuAsset* base_terrain,
     const std::array<float,16>* terrain_to_world,
     std::uint32_t map_side,std::uint8_t close_cascades,std::uint64_t base_terrain_generation,
-    float close_range,float camera_anchor_z) noexcept {
+    float close_range,float camera_anchor_z,const NativeShadowPhaseReference* previous_phase) noexcept {
     result = {};
+    ShadowPoint first_view_anchor{};bool have_view_anchor=false;
     if(map_side<1024 || map_side>4096 || (map_side&(map_side-1)) ||
        close_cascades<1 || close_cascades>3)return false;
     result.map_side=map_side;
@@ -1810,7 +1844,9 @@ bool build_retained_directional_coverage(
                                 static_cast<float>(point[component]);
                     include_world_point(quality.receivers_in_light,projected);
                 }
-                if(!fit_shadow_camera_slice_xy(quality,section,result.light_axes,map_side)) return false;
+                ShadowPoint view_anchor{NAN,NAN,NAN};
+                if(!fit_shadow_camera_slice_xy(quality,section,result.light_axes,map_side,previous_phase,index,&view_anchor)) return false;
+                if(index>=first_active&&!have_view_anchor&&finite_value(view_anchor[0])&&finite_value(view_anchor[1])&&finite_value(view_anchor[2])){first_view_anchor=view_anchor;have_view_anchor=true;}
                 // Close cascades follow camera depth, so an approach can
                 // only advance from C2 to C1 to C0. The fitted light center
                 // covers the entire depth band independently of terrain rays.
@@ -1828,9 +1864,10 @@ bool build_retained_directional_coverage(
                 if (!(radius>0) || !finite_value(radius)) return false;
                 const double texel=2*radius/map_side;
                 slice.light_radius=static_cast<float>(radius);
+                const auto origin=shadow_phase_origin(texel,{have_view_anchor?previous_phase:nullptr,index,first_view_anchor,&result.light_axes});
                 for(unsigned axis=0;axis<2;++axis)
-                    slice.light_center[axis]=static_cast<float>(
-                        std::floor(center[axis]/texel+.5)*texel);
+                    slice.light_center[axis]=static_cast<float>(origin[axis]+
+                        std::floor((center[axis]-origin[axis])/texel+.5)*texel);
             }
             NativeWorldBounds occupied{};
             for (const auto& clipped:clipped_receivers) {
@@ -1871,7 +1908,7 @@ bool build_retained_directional_coverage(
                 // but leaving it must not collapse its scale by sixfold. The
                 // captured tree view alternated between 200 and 1216 radius.
                 if (!fit_shadow_receiver_xy(slice,map_side,
-                    6.0*result.slices[3].light_radius)) return false;
+                    6.0*result.slices[3].light_radius,{have_view_anchor?previous_phase:nullptr,index,first_view_anchor,&result.light_axes})) return false;
             }
         }
         if(quality_valid) for(unsigned index=3;index<5;++index){
@@ -1975,8 +2012,10 @@ bool build_retained_directional_coverage(
             });
         }
         if (perspective && index < 3) {
-            if (!fit_shadow_camera_slice_xy(slice, section, result.light_axes,map_side)) return false;
-        } else if (!fit_shadow_receiver_xy(slice,map_side)) return false;
+            ShadowPoint view_anchor{NAN,NAN,NAN};
+            if (!fit_shadow_camera_slice_xy(slice,section,result.light_axes,map_side,previous_phase,index,&view_anchor)) return false;
+            if(index>=3u-close_cascades&&!have_view_anchor&&finite_value(view_anchor[0])&&finite_value(view_anchor[1])&&finite_value(view_anchor[2])){first_view_anchor=view_anchor;have_view_anchor=true;}
+        } else if (!fit_shadow_receiver_xy(slice,map_side,0,{have_view_anchor?previous_phase:nullptr,index,first_view_anchor,&result.light_axes})) return false;
     }
     result.valid = true;
     return true;

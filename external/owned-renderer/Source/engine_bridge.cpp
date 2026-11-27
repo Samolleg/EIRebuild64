@@ -18668,6 +18668,7 @@ void capture_owned_world_shadow_inputs(void* scene,void* renderer,OwnedShadowInp
         if(!read_owned_world_time(nullptr,in.time))throw "owned_shadow_time_unreadable_or_invalid";
         visible_only=g_embedded_visual_inputs->draw_undetected?0:1;interface_kind=1;
         in.flags=g_embedded_visual_inputs->scene_flags;
+        in.matching_current_sun=g_embedded_visual_inputs->matching_current_sun;
     } else {
         throw "embedded_shadow_inputs_missing";
     }

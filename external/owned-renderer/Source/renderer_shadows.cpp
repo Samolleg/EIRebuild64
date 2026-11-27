@@ -118,7 +118,7 @@ HRESULT Renderer::upload_native_shadow_constants(UINT slice){
  }
  if(!native_point_shadow_active_){
   constants.bias[5]=native_shadow_softness_;
-  constants.camera[5][0]=native_sun_filter_[0];constants.camera[5][1]=native_sun_filter_[1]; // nativeShadowShear, nativeSunFoliageFilter
+  constants.camera[5][0]=native_shadow_frame_.matching_current_sun?0.f:native_sun_filter_[0];constants.camera[5][1]=native_sun_filter_[1]; // nativeShadowShear, nativeSunFoliageFilter
  }
  // rt_sun_shadows: the layer of the renderer's own casters (nativeRtCoverShadow):
  // bit 8, its slice, the close map it was drawn with (valid, and still the only one).
@@ -446,6 +446,7 @@ bool Renderer::begin_native_shadows(const NativeShadowFrame& frame,std::uint8_t&
   upload_native_shadow_constants(0);return false;
  };
  try{
+  if(frame.matching_current_sun!=native_shadow_frame_.matching_current_sun)shadow_history_valid_=false;
   // The scene owner can resubmit the same immutable value after a confirmed
   // no-change source publication. Current map resources and the small numeric
   // projection tuple still have to match; no validity vector is rescanned or
@@ -464,6 +465,7 @@ bool Renderer::begin_native_shadows(const NativeShadowFrame& frame,std::uint8_t&
   if(!animate&&frame.publication_serial &&
      frame.publication_serial==native_shadow_frame_.publication_serial &&
      frame.world_epoch==native_shadow_frame_.world_epoch &&
+     frame.matching_current_sun==native_shadow_frame_.matching_current_sun &&
      (d3d12_?shadow12_.maps!=nullptr:native_shadow_depth_.Get() && native_shadow_depth_srv_.Get())){
    bool same=true;std::uint64_t reused=0;
    for(UINT index=0;index<5;++index){
@@ -531,7 +533,8 @@ bool Renderer::begin_native_shadows(const NativeShadowFrame& frame,std::uint8_t&
    decision.previous_validity_counts[index]=old.validity.size();
    decision.current_validity_counts[index]=next.validity.size();
    const bool comparable=native_shadow_valid_[index]&&old.enabled&&next.enabled&&
-    frame.world_epoch==native_shadow_frame_.world_epoch;
+    frame.world_epoch==native_shadow_frame_.world_epoch &&
+    frame.matching_current_sun==native_shadow_frame_.matching_current_sun;
    const auto drawn_camera=native_shadow_drawn_camera_[index];
    // Temporary reuse witness (removed once directional reuse is settled).
    const auto witness=[&](ShadowRendererDifference cause){
@@ -572,7 +575,7 @@ bool Renderer::begin_native_shadows(const NativeShadowFrame& frame,std::uint8_t&
    // sun-axis or coverage changes; stagger the two far-map refresh frames.
    const bool scheduled=index==3 ? native_frame_index_%5u==0 :
     native_frame_index_%10u==7u;
-   const bool covers=index>=3 && comparable && frame.world_epoch &&
+   const bool covers=!frame.matching_current_sun && index>=3 && comparable && frame.world_epoch &&
     far_shadow_projection_covers(old,next,index);
    if(index>=3 && comparable && frame.world_epoch && !covers)
     witness(ShadowRendererDifference::far_coverage_rejected);
@@ -660,7 +663,7 @@ bool Renderer::begin_native_shadows(const NativeShadowFrame& frame,std::uint8_t&
     const UINT redrawn=static_dirty&dirty_mask;
     const bool busy=(redrawn&~UINT(scroll_mask)&7u) || (index==4&&(redrawn&8u)) ||
      (index==3&&native_shadow_far_waits_[1]>=2);
-    if(heavy&&busy&&waits<(index==3?1u:2u)&&comparable&&frame.world_epoch&&
+    if(!frame.matching_current_sun&&heavy&&busy&&waits<(index==3?1u:2u)&&comparable&&frame.world_epoch&&
        native_shadow_static_valid_[index]&&far_shadow_view_continuous(drawn_camera,next.camera_slice)){
      ++waits;witness(ShadowRendererDifference::far_staggered);
      native_shadow_drawn_camera_[index]=drawn_camera;
@@ -698,6 +701,7 @@ bool Renderer::begin_native_shadows(const NativeShadowFrame& frame,std::uint8_t&
     if(retained_mask&bit)retained.validity=frame.slices[index].validity;
    }
   }
+  native_shadow_frame_.matching_current_sun=frame.matching_current_sun;
   native_shadow_frame_.world_epoch=frame.world_epoch;
   // A deferred slice still has older validity, and a retained slice keeps an
   // older projection. Do not let the immutable-value fast path postpone a
@@ -754,6 +758,11 @@ bool Renderer::end_native_shadows(bool commit) noexcept {
 }
 
 void Renderer::native_shadow_cull_projection(NativeShadowCullProjection& projection) const noexcept{SCENE_ENTRY("native_shadow_cull_projection");
+ projection.world_epoch=native_shadow_frame_.world_epoch;
+ projection.matching_current_sun=native_shadow_frame_.matching_current_sun;
+ projection.valid_mask=0;
+ for(unsigned i=0;i<5;++i)if(native_shadow_valid_[i]&&native_shadow_frame_.slices[i].enabled)
+  projection.valid_mask|=std::uint8_t(1u<<i);
  // The projection each map is actually drawn with this frame. A retained far
  // refresh keeps an older one than the published frame.
  for(UINT index=0;index<5;++index){
