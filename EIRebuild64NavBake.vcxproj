@@ -17,6 +17,7 @@
     </ClCompile>
     <ProjectReference Include="EI_Rebuild.vcxproj">
       <Project>{042A52A4-CF8B-4868-B551-448520F97F44}</Project>
+      <AdditionalProperties>EIExportNavBakeObjects=true</AdditionalProperties>
       <LinkLibraryDependencies>false</LinkLibraryDependencies>
       <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
     </ProjectReference>
@@ -25,8 +26,11 @@
     <Link><SubSystem>Console</SubSystem><EntryPointSymbol>wmainCRTStartup</EntryPointSymbol></Link>
   </ItemDefinitionGroup>
   <Target Name="LinkSharedNavigationHost" BeforeTargets="Link">
+    <ReadLinesFromFile File="$(MSBuildThisFileDirectory)out\obj\x64\$(Configuration)\EI_Rebuild\NavBake.objects">
+      <Output TaskParameter="Lines" ItemName="_CurrentEngineObjects" />
+    </ReadLinesFromFile>
     <ItemGroup>
-      <Link Include="$(MSBuildThisFileDirectory)out\obj\x64\$(Configuration)\EI_Rebuild\*.obj" Exclude="$(MSBuildThisFileDirectory)out\obj\x64\$(Configuration)\EI_Rebuild\Navigation_Cache.obj;$(MSBuildThisFileDirectory)out\obj\x64\$(Configuration)\EI_Rebuild\DetourTileCache*.obj;$(MSBuildThisFileDirectory)out\obj\x64\$(Configuration)\EI_Rebuild\E1RendererFacadeCheck.obj" />
+      <Link Include="@(_CurrentEngineObjects)" Exclude="$(MSBuildThisFileDirectory)out\obj\x64\$(Configuration)\EI_Rebuild\Navigation_Cache.obj;$(MSBuildThisFileDirectory)out\obj\x64\$(Configuration)\EI_Rebuild\DetourTileCache*.obj;$(MSBuildThisFileDirectory)out\obj\x64\$(Configuration)\EI_Rebuild\E1RendererFacadeCheck.obj" />
     </ItemGroup>
     <Error Condition="!Exists('$(MSBuildThisFileDirectory)out\obj\x64\$(Configuration)\EI_Rebuild\NavigationWorld.obj')" Text="Build the EI_Rebuild project before linking NavBake." />
   </Target>

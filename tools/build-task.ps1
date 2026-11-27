@@ -43,6 +43,10 @@ if (!$sdkversion) { throw 'Windows SDK not found.' }
 $dumpbin = Join-Path $vc 'bin/Hostx64/x64/dumpbin.exe'
 . (Join-Path $PSScriptRoot 'build-io.ps1')
 Assert-BuildCacheRoot $CacheRoot (Join-Path $project 'builds/rebuild64/cache')
+. (Join-Path $PSScriptRoot 'navbake-release.ps1')
+$releaseFile = Join-Path $repo 'Navigation/NavBake.release'
+$requestedNav = Read-NavBakeRevision $releaseFile
+$currentKit = Join-Path $project 'builds/rebuild64/current'
 function Get-KitInputIdentity {
     $python = $env:EI_PYTHON
     if (!$python) {
@@ -67,6 +71,10 @@ if ($CheckKitReuse) {
     if (!$ShaderResourceManifest -and $receipt.shaderManifest) {
         $ShaderResourceManifest = [string]$receipt.shaderManifest
     }
+    $nav = Get-NavBakeReleasePlan $currentKit $requestedNav
+    if ($receipt.navRevision -ne $requestedNav) { exit 3 }
+    if ($nav.Build -and $receipt.navAction -cne 'built') { exit 3 }
+    if (!$nav.Build -and ($receipt.navExe -cne $nav.Exe -or $receipt.navPdb -cne $nav.Pdb)) { exit 3 }
     if ($receipt.inputs -cne (Get-KitInputIdentity)) { exit 3 }
     exit 0
 }
@@ -237,7 +245,14 @@ try {
     # are not dependencies and must not scan the entire Windows SDK.
     $sourceCommit = (& git -C $sourceRepo -c "safe.directory=$sourceRepo" describe --always --abbrev=12 --dirty --exclude=*).Trim()
     if ($LASTEXITCODE -ne 0 -or !$sourceCommit) { throw 'Cannot identify source commit.' }
+    $nav = Get-NavBakeReleasePlan $currentKit $requestedNav
     $arguments = @("/p:ScriptCheckCommit=$sourceCommit",'EI_Rebuild.sln',"/m:$cores",'/nr:false','/t:Build','/p:Configuration=Release','/p:Platform=x64','/p:PreferredToolArchitecture=x64',"/p:VCToolsVersion=$vcversion","/p:WindowsTargetPlatformVersion=$sdkversion","/p:UserRootDir=$privateTemp\",'/nologo','/v:minimal')
+    if ($nav.Build) {
+        $arguments += '/p:EIExportNavBakeObjects=true'
+        Write-Host "NavBake: separate release $requestedNav requested."
+    } else {
+        Write-Host "NavBake: retain accepted release $requestedNav; baker project excluded from game build."
+    }
     if ($shaderReuse) {
         $reuseFolder = Split-Path -Parent $ShaderResourceManifest
         $destination = Join-Path $repo 'out/x64/Release/RendererShaders'
@@ -265,6 +280,14 @@ try {
         $buildExit = $LASTEXITCODE
     } finally { Pop-Location }
     if ($buildExit -ne 0) { throw "MSBuild failed ($buildExit); no serial retry." }
+    $bakerSource = $currentKit
+    if ($nav.Build) {
+        $bakerSource = Join-Path $repo 'out/x64/Release/EIRebuild64NavBake'
+        if ([IO.Directory]::Exists($bakerSource)) { [IO.File]::Delete((Join-Path $bakerSource 'EIRebuild64NavBake.exe')) }
+        $bakerArgs = @($arguments | Where-Object { $_ -notlike '*.sln' -and $_ -notlike '/flp:*' })
+        & (Join-Path $PSScriptRoot 'invoke-build.ps1') $msbuild (Join-Path $repo 'EIRebuild64NavBake.vcxproj') @bakerArgs /p:BuildProjectReferences=false "/flp:logfile=$task/navbake-build.log;verbosity=normal"
+        if ($LASTEXITCODE -ne 0) { throw "NavBake release build failed ($LASTEXITCODE)." }
+    }
     if ($shaderReuse) {
         $log = Get-Content -LiteralPath (Join-Path $task 'build.log') -Raw
         if ($log -match '(?im)^\s*(?:\d+>\s*)?(?:"[^"\r\n]*[\\/])?(?:fxc|dxc|RendererShaderEmbed)\.exe(?:"|\s)' -or
@@ -304,9 +327,14 @@ try {
     if (Test-Path -LiteralPath $kit) { throw "Kit already exists: $kit; retain evidence and use a fresh task for timing." }
     New-Item -ItemType Directory -Path $kit | Out-Null
     foreach ($target in @(@('EI_Rebuild','EIRebuild64'),@('EIRebuild64NavBake','EIRebuild64NavBake'),@('EIRebuild64Pack','EIRebuild64Pack'),@('EIRebuild64ModelCheck','EIRebuild64ModelCheck'))) {
-        Copy-Item -LiteralPath (Join-Path $repo "out/x64/Release/$($target[0])/$($target[1]).exe") -Destination $kit
-        Copy-Item -LiteralPath (Join-Path $repo "out/x64/Release/$($target[0])/$($target[0]).pdb") -Destination (Join-Path $kit ($target[1] + '.pdb'))
+        $folder = if ($target[1] -eq 'EIRebuild64NavBake') { $bakerSource } else { Join-Path $repo "out/x64/Release/$($target[0])" }
+        Copy-Item -LiteralPath (Join-Path $folder ($target[1]+'.exe')) -Destination $kit
+        Copy-Item -LiteralPath (Join-Path $folder ($target[0]+'.pdb')) -Destination (Join-Path $kit ($target[1]+'.pdb'))
     }
+    $navExe = Hash-File (Join-Path $kit 'EIRebuild64NavBake.exe')
+    $navPdb = Hash-File (Join-Path $kit 'EIRebuild64NavBake.pdb')
+    if (!$nav.Build -and ($navExe -cne $nav.Exe -or $navPdb -cne $nav.Pdb)) { throw 'Accepted NavBake EXE/PDB differ from the release manifest.' }
+    Copy-Item -LiteralPath $releaseFile -Destination (Join-Path $kit 'NavBake.release')
     Copy-Item -LiteralPath (Join-Path $repo 'out/x64/Release/EI_Rebuild/EI.RenderResources.dll') -Destination $kit
     Copy-Item -LiteralPath (Join-Path $repo 'out/x64/Release/RenderModule/EI.Renderer.dll') -Destination $kit
     Copy-Item -LiteralPath (Join-Path $repo 'out/x64/Release/RenderModule/RenderModule.pdb') -Destination (Join-Path $kit 'EI.Renderer.pdb')
@@ -361,7 +389,7 @@ try {
     $clock.Stop()
     Write-Utf8 (Join-Path $task 'build-result.txt') @("Seconds=$($clock.Elapsed.TotalSeconds)","MSBuildWorkers=$cores","CacheBytes=$bytes","CacheRoot=$CacheRoot")
     if ($inputIdentity -and $inputIdentity -ceq (Get-KitInputIdentity)) {
-        $receipt = @{version=1; inputs=$inputIdentity; manifest=(Hash-File (Join-Path $kit 'SHA256SUMS')); shaderManifest=$ShaderResourceManifest}
+        $receipt = @{version=1; inputs=$inputIdentity; manifest=(Hash-File (Join-Path $kit 'SHA256SUMS')); shaderManifest=$ShaderResourceManifest; navRevision=$requestedNav; navAction=$(if ($nav.Build) {'built'} else {'retained'}); navExe=$navExe; navPdb=$navPdb}
         $tempReceipt = $receiptPath + '.tmp'
         [IO.File]::WriteAllText($tempReceipt, ($receipt | ConvertTo-Json -Compress))
         [IO.File]::Move($tempReceipt,$receiptPath,$true)
