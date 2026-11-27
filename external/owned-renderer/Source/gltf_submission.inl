@@ -68,7 +68,11 @@ bool prepare_gltf_pose(const RetainedVisualSample &sample,
     const bool calmRider=sample.riding && !sample.rideTransition && sample.riding_calm && !sample.values.dead;
     const auto idle=state.riding_idle.Update(calmRider,clock,true);
     float idleTime=-1;
-    if(idle.variant) {
+    const auto paired = sample.mountClip.empty() ? UINT32_MAX : gltf::named_clip(animation,sample.mountClip);
+    if (paired!=UINT32_MAX) {
+        clip=paired;
+        idleTime=(std::min)(sample.mountTime,animation.clips[clip].duration);
+    } else if(idle.variant) {
         static constexpr const char* riderClips[]{"ride_idle_look_left","ride_idle_look_right","ride_idle_settle"};
         const auto name=riderClips[idle.variant-1];
         const auto selected=gltf::named_clip(animation,name);

@@ -13,6 +13,7 @@
 #include "../LiveObserver.h"
 #include "../UnitClientSpecific.h"
 #include "embedded_host.h"
+#include "environment_asset.h"
 #include "astral_rift.h"
 
 namespace OwnedRender {
@@ -138,7 +139,16 @@ bool completeVisualFrame(owned::RetainedVisualFrame& frame, bool combat) noexcep
                         }
                         sample.rideProgress=progress;
                         sample.rideTransition=actor->RidingTransitionClip(theWorld.GetRenderTimeSegments());
-                    } else seat[2]+=.55f;
+                    } else {
+                        seat[2]+=.55f;
+                        if (it->assembly && it->assembly->environment_source) {
+                            const auto& view=it->assembly->environment_source->view;
+                            if (view.clip.rfind("tack_held_",0)==0) {
+                                sample.mountClip=view.clip;
+                                sample.mountTime=view.seconds;
+                            }
+                        }
+                    }
                     sample.object_pose.position=seat;
                     sample.object_pose.quaternion=it->object_pose.quaternion;
                     sample.pose.root=seat;
