@@ -30,7 +30,9 @@ BOOL CObject3DClientSpecific::DrawModelPreview(CRenderer* renderer) try
         return FALSE;
     };
     auto* animation = lpObject->GetAnimationSystem2();
-    if (!animation) return reject("preview.animation_source");
+    const auto& environment = static_cast<CObject3D*>(lpObject)->GetEnvironment();
+    const bool native = environment && environment->native_model;
+    if (!native && !animation) return reject("preview.animation_source");
     // Camp/display copies can have negative ids and are deliberately absent
     // from E1Scene membership. Give the private UI resource its own namespace.
     if (!ownedPreviewResource) {
@@ -48,19 +50,20 @@ BOOL CObject3DClientSpecific::DrawModelPreview(CRenderer* renderer) try
     sample.assembly = ownedPreviewAssembly;
     sample.status = owned::RetainedVisualStatus::ready;
     bool registrySelected = false;
-    const auto registryAsset = dynamic_cast<const CUnit*>(lpObject)
+    const auto registryAsset = !native && dynamic_cast<const CUnit*>(lpObject)
         ? owned::skn::select_gltf(sample.assembly->skeleton->visual_reference,
             sample.assembly->main_hero_visual, registrySelected) : nullptr;
     // Preserve the established FIG/SKN preview facts. Only a registry visual
     // needs unit group admission and a completed, privately placed pose.
     sample.values.unit = registrySelected;
-    sample.completed_pose = registrySelected;
+    sample.completed_pose = native || registrySelected;
     if (registrySelected && sample.assembly->main_hero_visual)
         sample.physique = static_cast<const CUnit*>(lpObject)->VisualPhysiqueInput();
     sample.object_pose.shape = sample.assembly->shape;
     if (++ownedPreviewSerial == 0) ++ownedPreviewSerial;
     OwnedRender::E1AnimationSelection selected;
-    if (!animation->GetOwnedCurrentAnimationSelection(selected))
+    if (native) selected.visual.neutral = true;
+    else if (!animation->GetOwnedCurrentAnimationSelection(selected))
         return reject("preview.selected_clip");
     sample.selection = selected.visual;
     // The source controller has completed its callbacks. The UI owns only the
@@ -70,7 +73,7 @@ BOOL CObject3DClientSpecific::DrawModelPreview(CRenderer* renderer) try
     if (!ownedPreviewViews) ownedPreviewViews = std::make_shared<owned::ModelPreviewViews>();
     auto& viewClock = ownedPreviewViews->at(clock.clock);
     if (!owned::prepare_model_preview_phase(viewClock, sample, ownedPreviewRevision,
-            renderer->GetD3D()->ModelPreviewFrame(), clock.now, animation->GetTime(),
+            renderer->GetD3D()->ModelPreviewFrame(), clock.now, animation ? animation->GetTime() : 0,
             OwnedPreviewSourceAccess::Rate(dynamic_cast<const CUnit*>(lpObject))))
         return reject("preview.phase");
 
@@ -101,7 +104,7 @@ BOOL CObject3DClientSpecific::DrawModelPreview(CRenderer* renderer) try
     sample.object_pose.quaternion = placement.quaternion;
     struct Part { CFigure* figure; CMaterial* material; unsigned set; std::size_t ordinal; };
     std::vector<Part> parts;
-    for (unsigned set = 0; set < 2; ++set) {
+    for (unsigned set = 0; !native && set < 2; ++set) {
         if (!sets[set]) continue;
         for (int group = 0; group < sets[set]->matgroups.GetSize(); ++group) {
             const auto* source = sets[set]->matgroups[group];
@@ -153,6 +156,39 @@ BOOL CObject3DClientSpecific::DrawModelPreview(CRenderer* renderer) try
         CDX11* renderer; bool finished = false;
         ~FinishPreview() { if (!finished) try { renderer->FlushC56CampFigures(); } catch (...) {} }
     } finish{renderer->GetD3D()};
+    if (native) {
+        owned::NativeWorldGeometry::Pose* pose = nullptr;
+        if (!owned::retained_visual_gpu_pose(sample, pose) || !pose) return reject("preview.native_pose");
+        pose->root_to_world = pose->placed_with_sole(objectToWorld);
+        bool submitted = false;
+        for (std::size_t i = 0; i < sample.assembly->parts.size(); ++i) {
+            const auto& part = sample.assembly->parts[i];
+            if (!part.geometry || part.geometry->indices.empty()) continue;
+            owned::NativeGeometryView view{};
+            if (!owned::prepare_model_preview_geometry(sample, i, *pose, objectToWorld,
+                    worldToClip, textureTime, fog, ownedPreviewSerial, view)) return reject("preview.native_geometry");
+            // Native models already carry skinned, object-local vertices. Present those
+            // vertices directly in HUD space, as inventory GLBs do. World LOD and
+            // world camera culling do not describe a model inside a panel.
+            view.world = {};
+            view.lod_figure = nullptr;
+            view.prepared_identity = {};
+            view.prepared_mesh = nullptr;
+            view.geometry_revision_valid = false;
+            view.object_to_clip = owned::retained_multiply_matrix(worldToClip, objectToWorld);
+            view.interface_preview = true;
+            view.flags &= ~owned::native_ground_contact_flag;
+            view.fog = fog;
+            view.lighting.enabled = true;
+            view.lighting.object_to_world = objectToWorld;
+            if (!renderer->GetD3D()->SubmitC74Figure(view, &illumination.world, illumination.points))
+                return reject("preview.native_submission");
+            submitted = true;
+        }
+        const bool flushed = renderer->GetD3D()->FlushC56CampFigures();
+        finish.finished = true;
+        return submitted && flushed ? TRUE : reject("preview.native_flush");
+    }
     owned::ModelPartResult result;
     const owned::ModelPreviewInput input{sample, objectToWorld, worldToClip,
         textureTime, fog, ownedPreviewSerial, false};

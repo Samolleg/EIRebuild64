@@ -292,8 +292,10 @@ SAIMark *CAIMarkManager::MakeNewMark(const CPlot3D &pos, int nPlayerNum)
 SAIMark *CAIMarkManager::AddFootStep(const CPlot3D &pos, CUnitServer *pUnitServer)
 {
     SAITileInfo &footstepTile = theWorldServer.aiMap.GetTileInfo(pos);
-    ProduceSoundFootstep(pUnitServer,
-                         pUnitServer->GetFSSoundDetect() * footstepTile.fpFootstepStrengths[2]);
+    auto* rider = pUnitServer->GetUnit()->MountedRider();
+    auto* source = rider ? static_cast<CUnitServer*>(rider->GetUnitSpecific()) : pUnitServer;
+    ProduceSoundFootstep(source, pUnitServer->GetFSSoundDetect() * footstepTile.fpFootstepStrengths[2],
+                         AI_HEAR_FOOTSTEP_DELAY, &pos);
     return 0; // CRAP now we have no footsteps
     /*
             CUnit *pUnit = pUnitServer->GetUnit();
@@ -363,6 +365,7 @@ void CAIMarkManager::ProduceSoundFootstep(CUnitServer *pUnitSrc, float fpStrengt
     CUnit *pSrc = pUnitSrc->GetUnit();
     const CPlot3D &soundPos = pSoundPos ? *pSoundPos : pSrc->GetCP();
 
+
     pAIMap->GetUnitsNear(soundPos, heard, 50);
     pos = heard.GetHeadPosition();
     while (pos)
@@ -388,7 +391,7 @@ void CAIMarkManager::ProduceSoundFootstep(CUnitServer *pUnitSrc, float fpStrengt
                     szText.Format("Unit %i heard unit %i from %fm distance", pUnit->GetID(),
                                   pSrc->GetID(), fabs(pUnit->GetCP() - pSrc->GetCP()));
                 }
-                env.HearSound(pSrc->GetCP(), nDelay, szText);
+                env.HearSound(soundPos, nDelay, szText);
             }
         }
     }

@@ -274,7 +274,8 @@ void CPlayerServer::SendShowPath(CUnit *pWho, CAIFullRoute &route, const CPlot3D
     wpkt.Write(&res, sizeof(res));
     wpkt.Write(ptDest.x);
     wpkt.Write(ptDest.y);
-    wpkt.Write(pWho->GetID());
+    auto* rider=pWho->MountedRider();
+    wpkt.Write(rider ? rider->GetID() : pWho->GetID());
     wpkt.Write(fpShowLeng);
     if (type != CPlayer::PPT_NOPATH)
     {

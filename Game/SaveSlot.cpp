@@ -471,6 +471,7 @@ void Slot::FinalizeWorld(Document &d, CGSVariableSet* arriving)
                     }
                 }
                 d.world->aiMap.SetGraphRebuild(false);
+                d.world->RefreshPlacedHorseTextures();
                 // Static objects are sent once by NewZone, outside visibility updates.
                 auto snapshotPlayer=std::unique_ptr<CPlayer,void(*)(CPlayer *)>(
                     static_cast<CPlayerManager *>(d.world->GetPlayerManager())->CreatePlayer(),
