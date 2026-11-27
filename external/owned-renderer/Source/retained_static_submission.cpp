@@ -1,4 +1,5 @@
 #include "retained_static_submission.h"
+#include "engine_bridge.h"
 #include "astral_rift.h"
 #include "owned_resource_runtime.h"
 #include <atomic>
@@ -2170,6 +2171,22 @@ bool build_retained_shadow_frame(const RetainedDirectionalCoverage& coverage,
             for(float value:slice.world_to_light)if(!finite_value(value))return false;
         }
         frame.slices[4].bias[2]=coverage.spatial_selection?1.f:0.f;
+        static thread_local std::array<float,3> logged{};
+        if (logged!=coverage.light_axes[2]) {
+            logged=coverage.light_axes[2];
+            for(unsigned i=0;i<5;++i) {
+                const auto& s=frame.slices[i];
+                auto at=[](const std::array<float,16>& m,unsigned i) {
+                    return m[i*4]*343.878+m[i*4+1]*263.46+m[i*4+2]*11.505+m[i*4+3];
+                };
+                char line[384]{};
+                std::snprintf(line,sizeof(line),"i=%u spatial=%d texel=%.6f side=%u pixel=%.5f,%.5f lightz=%.4f camzw=%.5f,%.5f sun=%.7f,%.7f,%.7f",
+                    i,int(coverage.spatial_selection),s.bias[0],coverage.map_side,
+                    (.5+.5*at(s.world_to_light,0))*coverage.map_side,(.5-.5*at(s.world_to_light,1))*coverage.map_side,
+                    at(s.world_to_light,2),at(s.camera_slice,2),at(s.camera_slice,3),logged[0],logged[1],logged[2]);
+                bridge_append_probe_event("shadow_grid_probe",line);
+            }
+        }
         frame.publication_serial=next_retained_shadow_revision();
         return true;
     }catch(...){frame={};return false;}
