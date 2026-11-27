@@ -5655,6 +5655,8 @@ void CUnitServer::GetRPGStats(SRPGUnitStats *pRPGNewUnitStats)
 void CUnitServer::GainExperience(float fpExp)
 {
     rpgUnitStats.GainExperienceInCombat(lpUnit, fpExp);
+    if (CPlayer *owner = lpUnit->GetOwner(); owner && owner->IsMainHero(lpUnit))
+        static_cast<CWorldServer *>(GetWorld())->CreditBaseCompanions(*owner, fpExp);
     RecalcRPGStats();
     //	rpgUnitStats.Heal( GetMapObjectServer()->GetRPGStats(), 10000 );
 }

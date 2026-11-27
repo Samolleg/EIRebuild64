@@ -64,6 +64,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include <vector>
 #include <set>
 #include <cmath>
+#include <array>
 #include "ModCampReferences.inl"
 /////////////////////////////////////////////////////////////////////////////////////
 const int N_TIMERECALCINTERVAL = 63; // should be power of 2 - 1
@@ -2031,6 +2032,76 @@ void CWorldServer::AddPersonage(int nID, const char *pszPrototype, const char *p
     DeployPersonages(0, pers, ptPlace, QNULL);
 }
 /////////////////////////////////////////////////////////////////////////////////////
+// количество наемников в игре и их родные зоны
+const int N_MAX_MERC_NUMBER = 10;
+static const char *pszLocalMercZone[N_MAX_MERC_NUMBER] = {
+    "bz1g", "bz1g",
+#ifdef __DEMO__
+    "bz1g",
+#else
+    "bz2g",
+#endif
+    "bz6g",
+
+    "bz8k", // 5
+    "bz8k", "bz14h", "bz14h", "bz9k",
+    "bz14h" // 10
+};
+
+namespace {
+struct BaseCompanion {
+    int id;
+    CString key;
+};
+
+const std::array<BaseCompanion, N_MAX_MERC_NUMBER> &BaseCompanions()
+{
+    static const auto companions = [] {
+        std::array<BaseCompanion, N_MAX_MERC_NUMBER> list{};
+        for (int i = 0; i < N_MAX_MERC_NUMBER; ++i)
+        {
+            CString name;
+            name.Format("merc%d", i + 1);
+            list[i].id = GetPersonageIDByName(name);
+            list[i].key.Format("dejavu.base_xp.merc%d", i + 1);
+        }
+        return list;
+    }();
+    return companions;
+}
+
+bool BaseCompanionExperienceActive(CWorldServer &world)
+{
+    const auto *mod = ModRuntime::Current();
+    return mod && mod->BaseCompanionExperienceEnabled() && world.GetServerMode() == SERV_MODE_LOCAL;
+}
+
+bool IsBaseCompanion(int id)
+{
+    for (const auto &companion : BaseCompanions())
+        if (companion.id == id)
+            return true;
+    return false;
+}
+
+bool ApplyBaseExperience(CPlayer &player, const BaseCompanion &companion, SRPGUnitStats &stats, float earned)
+{
+    const float pending = player.party.vars.GetVar(companion.key);
+    if (pending + earned <= 0)
+        return false;
+    stats.GainExperience(pending + earned, false);
+    if (pending > 0)
+        static_cast<CPlayerServer *>(player.GetPlayerSpecific())->SetVar(companion.key, 0);
+    return true;
+}
+
+void ApplyBaseExperience(CPlayer &player, const BaseCompanion &companion, CUnitServer &server, float earned = 0)
+{
+    if (ApplyBaseExperience(player, companion, *server.GetRPGStats(), earned))
+        server.RecalcRPGStats();
+}
+}
+
 void CWorldServer::GainExperience(CPlayer *pPlayer, float fpExp)
 {
     if (fpExp == 0)
@@ -2039,10 +2110,14 @@ void CWorldServer::GainExperience(CPlayer *pPlayer, float fpExp)
         return;
     CParty &people = pPlayer->party;
     CArray<int, int> dudes;
+    const bool onCompanionBase = curInterface == IFACE_BASE && BaseCompanionExperienceActive(*this);
     CUnitPtrHashIterator unitIter;
     for (CUnit *pUnit = unitIter.GetFirst(&pPlayer->unitsUnderControl); pUnit;
          pUnit = unitIter.GetNext())
     {
+        // Dismissal removes the party record before the base script releases control.
+        if (onCompanionBase && IsBaseCompanion(pUnit->GetID()) && !HasMerc(pPlayer, pUnit->GetID()))
+            continue;
         if (!pUnit->IsDead() && pUnit->GetTypeID() == MOTID_HUMAN)
             dudes.Add(pUnit->GetID());
     }
@@ -2078,22 +2153,26 @@ void CWorldServer::SetExits(CAArray<SZoneExit, SZoneExit &> &newExits)
     }
 }
 /////////////////////////////////////////////////////////////////////////////////////
-// количество наемников в игре и их родные зоны
-const int N_MAX_MERC_NUMBER = 10;
-static const char *pszLocalMercZone[N_MAX_MERC_NUMBER] = {
-    "bz1g", "bz1g",
-#ifdef __DEMO__
-    "bz1g",
-#else
-    "bz2g",
-#endif
-    "bz6g",
+void CWorldServer::CreditBaseCompanions(CPlayer &player, float heroShare)
+{
+    if (!(heroShare > 0) || !std::isfinite(heroShare) || !BaseCompanionExperienceActive(*this))
+        return;
+    for (int merc = 1; merc <= N_MAX_MERC_NUMBER; ++merc)
+    {
+        const auto &companion = BaseCompanions()[merc - 1];
+        if (HasMerc(&player, companion.id))
+            continue;
+        const float earned = heroShare * 0.2f;
+        auto *unit = curInterface == IFACE_BASE && szCurrentZoneName.CompareNoCase(pszLocalMercZone[merc - 1]) == 0
+            ? GetUnit(companion.id) : nullptr;
+        if (unit && !unit->IsDead())
+            ApplyBaseExperience(player, companion, *static_cast<CUnitServer *>(unit->GetUnitSpecific()), earned);
+        else
+            static_cast<CPlayerServer *>(player.GetPlayerSpecific())->SetVar(companion.key,
+                player.party.vars.GetVar(companion.key) + earned);
+    }
+}
 
-    "bz8k", // 5
-    "bz8k", "bz14h", "bz14h", "bz9k",
-    "bz14h" // 10
-};
-/////////////////////////////////////////////////////////////////////////////////////
 int CWorldServer::GetMercsNumber(int nPlayer)
 {
     CPlayer *pPlayer = GetPlayer(nPlayer);
@@ -2178,6 +2257,9 @@ void CWorldServer::RecalcMercBriefings()
             }
             else
             {
+                if (bIsNativeZone && curInterface == IFACE_BASE && BaseCompanionExperienceActive(*this))
+                    if (auto *unit = GetUnit(nID); unit && !unit->IsDead())
+                        ApplyBaseExperience(*pPlayer, BaseCompanions()[nMerc - 1], *static_cast<CUnitServer *>(unit->GetUnitSpecific()));
                 // has not this merc in party
                 if (vars.GetVar(szGoodbye))
                 {
@@ -2285,11 +2367,22 @@ void CWorldServer::OnBriefingCompleteMercs(CPlayer *pPlayer, const char *pszBrie
         {
             pPS->SetVar(szAvail, 2);
             if (pMerc)
-                pPlayer->party.CreatePersonage(szMercName, pMerc->GetPrototype()->szName, "");
+            {
+                auto &member = pPlayer->party.CreatePersonage(szMercName, pMerc->GetPrototype()->szName, "");
+                if (BaseCompanionExperienceActive(*this))
+                {
+                    auto &server = *static_cast<CUnitServer *>(pMerc->GetUnitSpecific());
+                    ApplyBaseExperience(*pPlayer, BaseCompanions()[nMerc - 1], server);
+                    member.stats.fpExperience = server.GetRPGStats()->fpExperience;
+                    member.stats.fExpPenalty = server.GetRPGStats()->fExpPenalty;
+                }
+            }
             else
             {
                 ASSERT(0);
-                pPlayer->party.CreatePersonage(szMercName, "Human Hero", "");
+                auto &member = pPlayer->party.CreatePersonage(szMercName, "Human Hero", "");
+                if (BaseCompanionExperienceActive(*this))
+                    ApplyBaseExperience(*pPlayer, BaseCompanions()[nMerc - 1], member.stats, 0);
             }
         }
     }

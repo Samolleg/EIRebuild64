@@ -898,7 +898,7 @@ void SRPGUnitStats::AddExperience(float fExp)
 }
 // gain experience and recalc it to character points.
 // also, recalc all stats
-void SRPGUnitStats::GainExperience(float fpGainedExperience)
+void SRPGUnitStats::GainExperience(float fpGainedExperience, bool useIntelligence)
 {
     if (auto* mod = ModRuntime::Current())
     {
@@ -907,12 +907,12 @@ void SRPGUnitStats::GainExperience(float fpGainedExperience)
         {
             // ExpLimitCheck uses the original intelligence multiplier for the award and cap.
             const float multiplier = float(pow(1.04, psIntelligence.fpEffectiveValue - 25.0f));
-            AddExperience(fpGainedExperience * multiplier);
+            AddExperience(useIntelligence ? fpGainedExperience * multiplier : fpGainedExperience);
             fpExperience = Min(fpExperience, limit * multiplier);
             return;
         }
     }
-    AddExperience(fpGainedExperience * GetExpMultiplier());
+    AddExperience(useIntelligence ? fpGainedExperience * GetExpMultiplier() : fpGainedExperience);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void SRPGUnitStats::GainExperienceInCombat(CUnit *pUnit, float fpGainedExperience)

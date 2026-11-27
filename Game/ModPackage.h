@@ -65,6 +65,7 @@ public:
     CModPackage(const CModPackage&)=delete;
     CModPackage& operator=(const CModPackage&)=delete;
     bool RegisteredLootEnabled() const { return registeredLoot; }
+    bool BaseCompanionExperienceEnabled() const { return baseCompanionExperience; }
     bool SinglePlayerAllowed() const { return singlePlayerAllowed; }
     bool ExtendActiveObjectsArea() const { return extendActiveObjectsArea; }
     bool BriefingWeaponsEnabled() const { return briefingWeapons; }
@@ -249,6 +250,7 @@ private:
     FalloutSettings falloutSettings;
     float magicRandomLimit=-1.0f;
     bool saveInMod=true;
+    bool baseCompanionExperience=false;
     bool singlePlayerAllowed=true;
     bool extendActiveObjectsArea=false;
     bool briefingWeapons=true;

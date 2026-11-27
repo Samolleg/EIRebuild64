@@ -147,6 +147,9 @@ void CModPackage::Load(const std::string &directory){
  SpellTextures::Load(root);
  CFileRegistry config;if(!config.Open(Join(root,"config.reg").c_str()))throw std::runtime_error("Cannot open mod config.reg");
  saveIdentity=SaveModIdentity::Read(config);
+ // Use the package identity so moving or renaming the mod folder preserves the rule.
+ baseCompanionExperience = saveIdentity == SaveModIdentity::Make(
+     u8"\u0414\u0435\u0436\u0430\u0432\u044e", u8"\u041d\u0430\u043b\u0430");
  saveInMod=config.GetInt("MOD","GameSaves",1)!=0;
   forceTutorial=ModConfiguration::Bool(config,"MOD","ForceShowTutorial",false);
   gameDebugFile=(LPCSTR)config.GetString("Dev","GameDebugFile","");
